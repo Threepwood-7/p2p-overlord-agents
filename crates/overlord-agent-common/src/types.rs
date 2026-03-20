@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-pub use overlord_agent_nat::AgentInterfaceReport;
+pub use overlord_agent_nat::{AgentNetworkReport, AgentNetworkSelections};
 use overlord_agent_nat::NatStatusSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -82,7 +82,7 @@ pub struct IndexerStats {
     pub staging_queue_depth: u32,
     pub uptime_secs: u64,
     pub nat: Option<NatStatusSnapshot>,
-    pub interface_report: Option<AgentInterfaceReport>,
+    pub interface_report: Option<AgentNetworkReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

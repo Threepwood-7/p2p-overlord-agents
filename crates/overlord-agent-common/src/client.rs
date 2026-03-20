@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Url;
 
 use crate::types::{
-    AgentInterfaceReport, ConfigUpdate, IndexerRegistration, IndexerStats, PopularHash,
+    AgentNetworkReport, ConfigUpdate, IndexerRegistration, IndexerStats, PopularHash,
     RegisterRequest, RegistrationResponse, ResultBatch, SearchJob, SnoopEntry,
 };
 
@@ -109,7 +109,7 @@ impl CoordinatorClient {
             .await?)
     }
 
-    pub async fn interfaces(&self) -> Result<AgentInterfaceReport> {
+    pub async fn interfaces(&self) -> Result<AgentNetworkReport> {
         let url = self.base_url.join("/api/internal/interfaces")?;
         Ok(self
             .http
@@ -117,7 +117,7 @@ impl CoordinatorClient {
             .send()
             .await?
             .error_for_status()?
-            .json::<AgentInterfaceReport>()
+            .json::<AgentNetworkReport>()
             .await?)
     }
 

@@ -39,26 +39,46 @@ pub enum InterfaceSelectionState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentInterfaceReport {
-    #[serde(default)]
-    pub interfaces: Vec<AgentInterface>,
+pub struct InterfaceBindingSelection {
+    pub selected_interface_name: Option<String>,
+    pub bind_ip: Option<String>,
+    pub selection_confirmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterfaceBindingReport {
     pub recommended_interface_name: Option<String>,
     pub selected_interface_name: Option<String>,
     pub resolved_bind_ip: Option<String>,
     pub selection_confirmed: bool,
-    pub networking_ready: bool,
+    pub ready: bool,
     pub state: InterfaceSelectionState,
     pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolvedInterfaceBinding {
+pub struct ResolvedInterfaceBindingReport {
     pub selected_interface_name: Option<String>,
     pub bind_ip: Option<String>,
     pub recommended_interface_name: Option<String>,
     pub selection_confirmed: bool,
+    pub ready: bool,
     pub state: InterfaceSelectionState,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentNetworkReport {
+    #[serde(default)]
+    pub interfaces: Vec<AgentInterface>,
+    pub control: InterfaceBindingReport,
+    pub p2p: InterfaceBindingReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentNetworkSelections {
+    pub control: InterfaceBindingSelection,
+    pub p2p: InterfaceBindingSelection,
 }
 
 pub fn detect_interfaces() -> Result<Vec<AgentInterface>> {
@@ -131,17 +151,15 @@ pub fn resolve_bind_ip(
         .map(|address| address.address.clone())
 }
 
-pub fn build_interface_report(
-    interfaces: Vec<AgentInterface>,
-    binding: &ResolvedInterfaceBinding,
-) -> AgentInterfaceReport {
-    AgentInterfaceReport {
-        interfaces,
+pub fn build_interface_binding_report(
+    binding: &ResolvedInterfaceBindingReport,
+) -> InterfaceBindingReport {
+    InterfaceBindingReport {
         recommended_interface_name: binding.recommended_interface_name.clone(),
         selected_interface_name: binding.selected_interface_name.clone(),
         resolved_bind_ip: binding.bind_ip.clone(),
         selection_confirmed: binding.selection_confirmed,
-        networking_ready: matches!(binding.state, InterfaceSelectionState::Applied),
+        ready: binding.ready,
         state: binding.state,
         last_error: binding.last_error.clone(),
     }
@@ -209,8 +227,8 @@ fn platform_has_default_route(_interface_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentInterface, AgentInterfaceAddress, InterfaceAddressFamily, ResolvedInterfaceBinding,
-        build_interface_report, recommend_interface, resolve_bind_ip,
+        AgentInterface, AgentInterfaceAddress, InterfaceAddressFamily, ResolvedInterfaceBindingReport,
+        build_interface_binding_report, recommend_interface, resolve_bind_ip,
     };
 
     fn iface(name: &str, vpn: bool, default_route: bool, ip: &str) -> AgentInterface {
@@ -246,18 +264,26 @@ mod tests {
     }
 
     #[test]
-    fn build_interface_report_preserves_selection_state() {
-        let interfaces = vec![iface("hide.me", true, false, "10.10.10.2")];
-        let binding = ResolvedInterfaceBinding {
+    fn resolve_bind_ip_allows_any_override_without_interface_selection() {
+        assert_eq!(
+            resolve_bind_ip(&[], None, Some("0.0.0.0")).as_deref(),
+            Some("0.0.0.0")
+        );
+    }
+
+    #[test]
+    fn build_interface_binding_report_preserves_selection_state() {
+        let binding = ResolvedInterfaceBindingReport {
             selected_interface_name: Some("hide.me".to_string()),
             bind_ip: Some("10.10.10.2".to_string()),
             recommended_interface_name: Some("hide.me".to_string()),
             selection_confirmed: true,
+            ready: true,
             state: super::InterfaceSelectionState::Applied,
             last_error: None,
         };
-        let report = build_interface_report(interfaces, &binding);
-        assert!(report.networking_ready);
+        let report = build_interface_binding_report(&binding);
+        assert!(report.ready);
         assert_eq!(report.selected_interface_name.as_deref(), Some("hide.me"));
         assert_eq!(report.resolved_bind_ip.as_deref(), Some("10.10.10.2"));
     }

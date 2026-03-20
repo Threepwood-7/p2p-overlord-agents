@@ -24,6 +24,9 @@ pub struct CoordinatorConfig {
 #[serde(default)]
 pub struct AgentConfig {
     pub bind_addr: String,
+    pub control_selected_interface_name: Option<String>,
+    pub control_selection_confirmed: bool,
+    pub control_bind_ip: Option<String>,
     pub indexer_id_path: String,
     pub state_dir: String,
     pub hostname: String,
@@ -78,7 +81,10 @@ impl Default for CoordinatorConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:13301".to_string(),
+            bind_addr: "0.0.0.0:13301".to_string(),
+            control_selected_interface_name: None,
+            control_selection_confirmed: false,
+            control_bind_ip: None,
             indexer_id_path: "./runtime/overlord-agent-emule.indexer-id".to_string(),
             state_dir: "./runtime".to_string(),
             hostname: "localhost".to_string(),
@@ -125,8 +131,23 @@ impl EmuleAgentConfig {
             .with_context(|| format!("failed to read config from {}", path.display()))?;
         let mut config: Self = toml::from_str(&contents)
             .with_context(|| format!("failed to parse config from {}", path.display()))?;
+        normalize_agent_config(&mut config.agent);
         normalize_nat_config(&mut config.nat);
         Ok(config)
+    }
+}
+
+fn normalize_agent_config(config: &mut AgentConfig) {
+    for value in [
+        &mut config.control_selected_interface_name,
+        &mut config.control_bind_ip,
+    ] {
+        if value
+            .as_deref()
+            .is_some_and(|inner| inner.trim().is_empty())
+        {
+            *value = None;
+        }
     }
 }
 
@@ -148,7 +169,7 @@ fn normalize_nat_config(config: &mut NatConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::{NatConfig, normalize_nat_config};
+    use super::{AgentConfig, NatConfig, normalize_agent_config, normalize_nat_config};
 
     #[test]
     fn normalize_nat_config_drops_blank_optional_fields() {
@@ -166,5 +187,19 @@ mod tests {
         assert_eq!(config.bind_ip, None);
         assert_eq!(config.igd_ip, None);
         assert_eq!(config.external_ip_override, None);
+    }
+
+    #[test]
+    fn normalize_agent_config_drops_blank_optional_fields() {
+        let mut config = AgentConfig {
+            control_selected_interface_name: Some(" ".to_string()),
+            control_bind_ip: Some("\t".to_string()),
+            ..AgentConfig::default()
+        };
+
+        normalize_agent_config(&mut config);
+
+        assert_eq!(config.control_selected_interface_name, None);
+        assert_eq!(config.control_bind_ip, None);
     }
 }

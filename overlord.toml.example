@@ -2,7 +2,10 @@
 url = "http://127.0.0.1:13300"
 
 [agent]
-bind_addr = "127.0.0.1:13301"
+bind_addr = "0.0.0.0:13301"
+control_selected_interface_name = ""
+control_selection_confirmed = false
+control_bind_ip = ""
 indexer_id_path = "./runtime/overlord-agent-emule.indexer-id"
 state_dir = "./runtime"
 hostname = "localhost"

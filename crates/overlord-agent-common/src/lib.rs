@@ -5,11 +5,12 @@ pub mod types;
 
 pub use client::CoordinatorClient;
 pub use overlord_agent_nat::{
-    AgentInterface, AgentInterfaceAddress, AgentInterfaceReport, InterfaceAddressFamily,
+    AgentInterface, AgentInterfaceAddress, AgentNetworkReport, AgentNetworkSelections,
+    InterfaceAddressFamily, InterfaceBindingReport, InterfaceBindingSelection,
     InterfaceSelectionState, MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatStatus,
-    NatStatusSnapshot, ResolvedInterfaceBinding, SelectedGateway, TransportProtocol,
+    NatStatusSnapshot, ResolvedInterfaceBindingReport, SelectedGateway, TransportProtocol,
 };
-pub use server::IndexerServer;
+pub use server::{IndexerServer, RunningIndexerServer};
 pub use service::IndexerService;
 pub use types::{
     ConfigUpdate, ContentType, FileRecord, HashType, IndexerRegistration, IndexerStats,

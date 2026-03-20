@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::State,
@@ -9,6 +9,7 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::Value;
+use tokio::{sync::oneshot, task::JoinHandle};
 
 use crate::{
     service::IndexerService,
@@ -40,6 +41,12 @@ where
     service: Arc<S>,
 }
 
+pub struct RunningIndexerServer {
+    local_addr: SocketAddr,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: JoinHandle<Result<()>>,
+}
+
 impl<S> IndexerServer<S>
 where
     S: IndexerService,
@@ -48,7 +55,7 @@ where
         Self { service }
     }
 
-    pub async fn serve(self, bind_addr: SocketAddr) -> Result<()> {
+    pub async fn spawn(self, bind_addr: SocketAddr) -> Result<RunningIndexerServer> {
         let state = AppState {
             service: self.service,
         };
@@ -63,8 +70,48 @@ where
             .with_state(state);
 
         let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-        axum::serve(listener, app).await?;
-        Ok(())
+        let local_addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .context("indexer control server exited with error")
+        });
+
+        Ok(RunningIndexerServer {
+            local_addr,
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        })
+    }
+
+    pub async fn serve(self, bind_addr: SocketAddr) -> Result<()> {
+        let server = self.spawn(bind_addr).await?;
+        server.wait().await
+    }
+}
+
+impl RunningIndexerServer {
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        self.task
+            .await
+            .context("failed to join indexer control server task")?
+    }
+
+    pub async fn wait(self) -> Result<()> {
+        self.task
+            .await
+            .context("failed to join indexer control server task")?
     }
 }
 

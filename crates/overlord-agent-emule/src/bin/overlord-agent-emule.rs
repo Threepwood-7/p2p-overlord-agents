@@ -28,7 +28,6 @@ async fn main() -> Result<()> {
 
     let agent = Arc::new(OverlordAgentEmule::new(config).await?);
     agent.start().await?;
-    agent.register_with_coordinator().await?;
 
     info!("starting overlord-agent-emule control server");
     agent.serve().await?;

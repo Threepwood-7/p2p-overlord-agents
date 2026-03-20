@@ -4,7 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::types::{
-    AgentInterfaceReport, ConfigUpdate, IndexerStats, PopularHash, Protocol, SearchJob, SnoopEntry,
+    AgentNetworkReport, ConfigUpdate, IndexerStats, PopularHash, Protocol, SearchJob, SnoopEntry,
 };
 
 #[async_trait]
@@ -19,7 +19,7 @@ pub trait IndexerService: Send + Sync + 'static {
     async fn stats(&self) -> Result<IndexerStats>;
     async fn apply_config(&self, config: ConfigUpdate) -> Result<()>;
 
-    async fn interfaces(&self) -> Result<AgentInterfaceReport> {
+    async fn interfaces(&self) -> Result<AgentNetworkReport> {
         anyhow::bail!("interfaces are not implemented for this agent")
     }
 
