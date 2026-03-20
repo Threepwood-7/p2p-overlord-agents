@@ -132,6 +132,7 @@ impl EmuleAgentConfig {
 
 fn normalize_nat_config(config: &mut NatConfig) {
     for value in [
+        &mut config.selected_interface_name,
         &mut config.bind_ip,
         &mut config.igd_ip,
         &mut config.external_ip_override,
@@ -152,6 +153,7 @@ mod tests {
     #[test]
     fn normalize_nat_config_drops_blank_optional_fields() {
         let mut config = NatConfig {
+            selected_interface_name: Some(" ".to_string()),
             bind_ip: Some(" ".to_string()),
             igd_ip: Some(String::new()),
             external_ip_override: Some("\t".to_string()),
@@ -160,6 +162,7 @@ mod tests {
 
         normalize_nat_config(&mut config);
 
+        assert_eq!(config.selected_interface_name, None);
         assert_eq!(config.bind_ip, None);
         assert_eq!(config.igd_ip, None);
         assert_eq!(config.external_ip_override, None);

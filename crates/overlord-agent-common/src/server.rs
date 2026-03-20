@@ -55,6 +55,7 @@ where
         let app = Router::new()
             .route("/api/internal/health", get(get_health::<S>))
             .route("/api/internal/stats", get(get_stats::<S>))
+            .route("/api/internal/interfaces", get(get_interfaces::<S>))
             .route("/api/internal/search", post(post_search::<S>))
             .route("/api/internal/enrich", post(post_enrich::<S>))
             .route("/api/internal/seed-popular", post(post_seed_popular::<S>))
@@ -88,6 +89,20 @@ where
         Ok(stats) => (StatusCode::OK, Json(serde_json::json!(stats))).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_interfaces<S>(State(state): State<AppState<S>>) -> impl IntoResponse
+where
+    S: IndexerService,
+{
+    match state.service.interfaces().await {
+        Ok(report) => (StatusCode::OK, Json(serde_json::json!(report))).into_response(),
+        Err(error) => (
+            StatusCode::NOT_IMPLEMENTED,
             Json(serde_json::json!({ "error": error.to_string() })),
         )
             .into_response(),

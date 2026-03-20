@@ -9,8 +9,12 @@ description = "Shared NAT reachability and port mapping support for Overlord age
 anyhow.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
+if-addrs = "0.13"
 rupnp = "3"
 serde.workspace = true
 socket2 = "0.5"
 tokio.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ipconfig = "0.3"

@@ -1,12 +1,12 @@
 use std::{
     collections::HashMap,
     fs,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -16,8 +16,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use md4::{Digest, Md4};
 use overlord_agent_nat::{
-    MappingExposure, MappingSpec, NatCapableAgent, NatManager, NatManagerBuilder,
-    RupnpPortMappingProvider, TransportProtocol,
+    AgentInterfaceReport, InterfaceSelectionState, MappingExposure, MappingSpec, NatCapableAgent,
+    NatManager, NatManagerBuilder, ResolvedInterfaceBinding, RupnpPortMappingProvider,
+    TransportProtocol, build_interface_report, detect_interfaces, recommend_interface,
+    resolve_bind_ip,
 };
 use tokio::{
     sync::{Mutex, RwLock},
@@ -57,19 +59,25 @@ struct AgentStatePaths {
     nodes_dat_path: PathBuf,
 }
 
+#[derive(Clone)]
+struct AgentNetworkRuntime {
+    dht: DhtNode,
+    nat: Arc<NatManager>,
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    shutdown: Arc<AtomicBool>,
+    passive_result_count: Arc<std::sync::atomic::AtomicU64>,
+}
+
 pub struct OverlordAgentEmule {
     config: Arc<RwLock<EmuleAgentConfig>>,
     coordinator: CoordinatorClient,
     indexer_id: Uuid,
-    dht: DhtNode,
-    nat: Arc<NatManager>,
     started_at: Instant,
     state_paths: AgentStatePaths,
     snoop_queue: Arc<Mutex<HashMap<String, SnoopEntry>>>,
-    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    runtime: Arc<Mutex<Option<AgentNetworkRuntime>>>,
+    selection_state: Arc<RwLock<ResolvedInterfaceBinding>>,
     started: AtomicBool,
-    shutdown: Arc<AtomicBool>,
-    passive_result_count: Arc<AtomicU64>,
 }
 
 impl OverlordAgentEmule {
@@ -80,58 +88,18 @@ impl OverlordAgentEmule {
         ensure_parent_dir(&state_paths.node_id_path)?;
         ensure_parent_dir(&state_paths.udp_key_path)?;
         ensure_parent_dir(&state_paths.nodes_dat_path)?;
-
-        let node_id = load_or_create_node_id(&state_paths.node_id_path)?;
-        let udp_key = load_or_create_udp_key(&state_paths.udp_key_path)?;
-        let bind_addr: SocketAddr = config
-            .kad
-            .udp_bind_addr
-            .parse()
-            .context("invalid kad.udp_bind_addr")?;
-        let nodes_dat = read_optional_bytes(&state_paths.nodes_dat_path)?;
-        let nodes_text =
-            (!config.kad.bootstrap_nodes.is_empty()).then(|| config.kad.bootstrap_nodes.join("\n"));
-
-        let dht = DhtNode::new(DhtConfig {
-            bind_addr,
-            node_id,
-            max_routing_table_size: 12_000,
-            max_concurrent_searches: 5,
-            search_timeout: Duration::from_secs(config.kad.search_timeout_secs),
-            store_timeout: Duration::from_secs(config.kad.store_timeout_secs),
-            republish_interval: Duration::from_secs(config.kad.republish_interval_secs),
-            max_outbound_pps: config.kad.max_outbound_pps,
-            search_phase2_fanout: config.kad.search_phase2_fanout,
-            keyword_result_cap: config.kad.keyword_result_cap,
-            source_result_cap: config.kad.source_result_cap,
-            notes_result_cap: config.kad.notes_result_cap,
-            obfuscation_enabled: config.kad.obfuscation_enabled,
-            udp_key,
-            nodes_dat,
-            nodes_text,
-        })
-        .await?;
-
-        let nat = Arc::new(
-            NatManagerBuilder::new(config.nat.clone())
-                .with_mappings(Self::nat_mappings_from_config(&config)?)
-                .with_provider(Arc::new(RupnpPortMappingProvider))
-                .build(),
-        );
+        let selection_state = Self::resolve_selection_state(&config, None);
 
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             coordinator,
             indexer_id,
-            dht,
-            nat,
             started_at: Instant::now(),
             state_paths,
             snoop_queue: Arc::new(Mutex::new(HashMap::new())),
-            tasks: Arc::new(Mutex::new(Vec::new())),
+            runtime: Arc::new(Mutex::new(None)),
+            selection_state: Arc::new(RwLock::new(selection_state)),
             started: AtomicBool::new(false),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            passive_result_count: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -166,16 +134,10 @@ impl OverlordAgentEmule {
         IndexerServer::new(self).serve(bind_addr).await
     }
 
-    fn nat_mappings_from_config(config: &EmuleAgentConfig) -> Result<Vec<MappingSpec>> {
-        let kad_addr: SocketAddr = config
-            .kad
-            .udp_bind_addr
-            .parse()
+    fn nat_mappings_from_config(config: &EmuleAgentConfig, bind_ip: Option<&str>) -> Result<Vec<MappingSpec>> {
+        let kad_addr = resolved_socket_addr(&config.kad.udp_bind_addr, bind_ip)
             .context("invalid kad.udp_bind_addr for NAT mapping")?;
-        let ed2k_addr: SocketAddr = config
-            .kad
-            .ed2k_bind_addr
-            .parse()
+        let ed2k_addr = resolved_socket_addr(&config.kad.ed2k_bind_addr, bind_ip)
             .context("invalid kad.ed2k_bind_addr for NAT mapping")?;
 
         Ok(vec![
@@ -194,6 +156,166 @@ impl OverlordAgentEmule {
                 preferred_external_port: None,
             },
         ])
+    }
+
+    fn resolve_selection_state(
+        config: &EmuleAgentConfig,
+        runtime_error: Option<String>,
+    ) -> ResolvedInterfaceBinding {
+        let interfaces = detect_interfaces().unwrap_or_default();
+        let recommended_interface_name = recommend_interface(&interfaces);
+        let selected_interface_name = config.nat.selected_interface_name.clone();
+        let resolved_bind_ip = resolve_bind_ip(
+            &interfaces,
+            selected_interface_name.as_deref(),
+            config.nat.bind_ip.as_deref(),
+        );
+
+        let (state, last_error) = if let Some(error) = runtime_error {
+            (InterfaceSelectionState::Error, Some(error))
+        } else if !config.nat.selection_confirmed {
+            (InterfaceSelectionState::Pending, None)
+        } else if resolved_bind_ip.is_some() {
+            (InterfaceSelectionState::Confirmed, None)
+        } else {
+            (
+                InterfaceSelectionState::Error,
+                Some("selected interface does not currently resolve to an IPv4 bind address".to_string()),
+            )
+        };
+
+        ResolvedInterfaceBinding {
+            selected_interface_name,
+            bind_ip: resolved_bind_ip,
+            recommended_interface_name,
+            selection_confirmed: config.nat.selection_confirmed,
+            state,
+            last_error,
+        }
+    }
+
+    async fn interface_report(&self) -> AgentInterfaceReport {
+        let config = self.config.read().await.clone();
+        let interfaces = detect_interfaces().unwrap_or_default();
+        let mut binding = Self::resolve_selection_state(&config, None);
+        if self.runtime.lock().await.is_some() {
+            binding.state = InterfaceSelectionState::Applied;
+        } else if let Some(saved) = self.selection_state.try_read().ok() {
+            if matches!(saved.state, InterfaceSelectionState::Error) {
+                binding.state = InterfaceSelectionState::Error;
+                binding.last_error = saved.last_error.clone();
+            }
+        }
+        build_interface_report(interfaces, &binding)
+    }
+
+    async fn reconcile_runtime(&self) -> Result<()> {
+        let config = self.config.read().await.clone();
+        let binding = Self::resolve_selection_state(&config, None);
+        {
+            let mut selection_state = self.selection_state.write().await;
+            *selection_state = binding.clone();
+        }
+
+        if !binding.selection_confirmed {
+            self.stop_runtime().await?;
+            return Ok(());
+        }
+
+        let Some(bind_ip) = binding.bind_ip.clone() else {
+            self.stop_runtime().await?;
+            return Ok(());
+        };
+
+        self.stop_runtime().await?;
+        match self.build_runtime(&config, &bind_ip).await {
+            Ok(runtime) => {
+                let dht_task = runtime.dht.start();
+                runtime.tasks.lock().await.push(dht_task);
+                runtime.nat.start().await?;
+                self.spawn_background_tasks(&runtime, &config).await;
+                *self.runtime.lock().await = Some(runtime);
+                let mut selection_state = self.selection_state.write().await;
+                selection_state.state = InterfaceSelectionState::Applied;
+                selection_state.last_error = None;
+            }
+            Err(error) => {
+                let mut selection_state = self.selection_state.write().await;
+                selection_state.state = InterfaceSelectionState::Error;
+                selection_state.last_error = Some(error.to_string());
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn stop_runtime(&self) -> Result<()> {
+        if let Some(runtime) = self.runtime.lock().await.take() {
+            runtime.shutdown.store(true, Ordering::SeqCst);
+            let tasks = {
+                let mut tasks = runtime.tasks.lock().await;
+                std::mem::take(&mut *tasks)
+            };
+            for task in tasks {
+                task.abort();
+            }
+            runtime.nat.stop().await?;
+        }
+        Ok(())
+    }
+
+    async fn build_runtime(
+        &self,
+        config: &EmuleAgentConfig,
+        bind_ip: &str,
+    ) -> Result<AgentNetworkRuntime> {
+        let node_id = load_or_create_node_id(&self.state_paths.node_id_path)?;
+        let udp_key = load_or_create_udp_key(&self.state_paths.udp_key_path)?;
+        let bind_addr = resolved_socket_addr(&config.kad.udp_bind_addr, Some(bind_ip))
+            .context("invalid kad.udp_bind_addr")?;
+        let nodes_dat = read_optional_bytes(&self.state_paths.nodes_dat_path)?;
+        let nodes_text =
+            (!config.kad.bootstrap_nodes.is_empty()).then(|| config.kad.bootstrap_nodes.join("\n"));
+
+        let dht = DhtNode::new(DhtConfig {
+            bind_addr,
+            node_id,
+            max_routing_table_size: 12_000,
+            max_concurrent_searches: 5,
+            search_timeout: Duration::from_secs(config.kad.search_timeout_secs),
+            store_timeout: Duration::from_secs(config.kad.store_timeout_secs),
+            republish_interval: Duration::from_secs(config.kad.republish_interval_secs),
+            max_outbound_pps: config.kad.max_outbound_pps,
+            search_phase2_fanout: config.kad.search_phase2_fanout,
+            keyword_result_cap: config.kad.keyword_result_cap,
+            source_result_cap: config.kad.source_result_cap,
+            notes_result_cap: config.kad.notes_result_cap,
+            obfuscation_enabled: config.kad.obfuscation_enabled,
+            udp_key,
+            nodes_dat,
+            nodes_text,
+        })
+        .await?;
+
+        let mut nat_config = config.nat.clone();
+        if nat_config.bind_ip.is_none() {
+            nat_config.bind_ip = Some(bind_ip.to_string());
+        }
+
+        let nat = Arc::new(
+            NatManagerBuilder::new(nat_config)
+                .with_mappings(Self::nat_mappings_from_config(config, Some(bind_ip))?)
+                .with_provider(Arc::new(RupnpPortMappingProvider))
+                .build(),
+        );
+
+        Ok(AgentNetworkRuntime {
+            dht,
+            nat,
+            tasks: Arc::new(Mutex::new(Vec::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            passive_result_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        })
     }
 }
 
@@ -317,6 +439,19 @@ fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(Some(fs::read(path).with_context(|| {
         format!("failed to read {}", path.display())
     })?))
+}
+
+fn resolved_socket_addr(bind_addr: &str, bind_ip: Option<&str>) -> Result<SocketAddr> {
+    let mut addr: SocketAddr = bind_addr
+        .parse()
+        .with_context(|| format!("invalid bind address {bind_addr}"))?;
+    if let Some(bind_ip) = bind_ip {
+        let ip = bind_ip
+            .parse::<IpAddr>()
+            .with_context(|| format!("invalid bind ip {bind_ip}"))?;
+        addr = SocketAddr::new(ip, addr.port());
+    }
+    Ok(addr)
 }
 
 fn load_or_create_indexer_id(path: &str) -> Result<Uuid> {
@@ -775,7 +910,7 @@ impl NatCapableAgent for OverlordAgentEmule {
         self.config
             .try_read()
             .ok()
-            .and_then(|config| Self::nat_mappings_from_config(&config).ok())
+            .and_then(|config| Self::nat_mappings_from_config(&config, config.nat.bind_ip.as_deref()).ok())
             .unwrap_or_default()
     }
 }
@@ -799,30 +934,23 @@ impl IndexerService for OverlordAgentEmule {
             return Ok(());
         }
 
-        self.shutdown.store(false, Ordering::SeqCst);
         restore_snoop_queue(&self.coordinator, self.indexer_id, &self.snoop_queue).await;
-        self.tasks.lock().await.push(self.dht.start());
-        self.nat.start().await?;
-        self.spawn_background_tasks().await;
+        self.reconcile_runtime().await?;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        self.shutdown.store(true, Ordering::SeqCst);
-        let tasks = {
-            let mut tasks = self.tasks.lock().await;
-            std::mem::take(&mut *tasks)
-        };
-        for task in tasks {
-            task.abort();
-        }
-        self.nat.stop().await?;
+        self.stop_runtime().await?;
         flush_snoop_queue(&self.coordinator, self.indexer_id, &self.snoop_queue).await?;
         Ok(())
     }
 
     async fn search(&self, job: SearchJob) -> Result<()> {
-        let dht = self.dht.clone();
+        let runtime = self.runtime.lock().await.clone();
+        let Some(runtime) = runtime else {
+            anyhow::bail!("agent networking is waiting for interface selection");
+        };
+        let dht = runtime.dht.clone();
         let indexer_id = self.indexer_id;
         let config = self.config.clone();
         tokio::spawn(async move {
@@ -836,29 +964,52 @@ impl IndexerService for OverlordAgentEmule {
     async fn stats(&self) -> Result<IndexerStats> {
         let queue_depth = self.snoop_queue.lock().await.len() as u32;
         let uptime_secs = self.started_at.elapsed().as_secs();
+        let runtime = self.runtime.lock().await.clone();
         let crawl_rate = if uptime_secs == 0 {
             0.0
         } else {
-            self.passive_result_count.load(Ordering::Relaxed) as f32 / uptime_secs as f32
+            runtime
+                .as_ref()
+                .map(|runtime| runtime.passive_result_count.load(Ordering::Relaxed) as f32)
+                .unwrap_or(0.0)
+                / uptime_secs as f32
         };
+        let interface_report = self.interface_report().await;
 
         Ok(IndexerStats {
             indexer_id: self.indexer_id,
             protocol: Protocol::Kad2,
-            peers_connected: self.dht.routing_table_size() as u32,
+            peers_connected: runtime
+                .as_ref()
+                .map(|runtime| runtime.dht.routing_table_size() as u32)
+                .unwrap_or(0),
             crawl_rate,
             snoop_queue_depth: queue_depth,
             staging_queue_depth: 0,
             uptime_secs,
-            nat: Some(self.nat.status().await.snapshot()),
+            nat: match runtime {
+                Some(runtime) => Some(runtime.nat.status().await.snapshot()),
+                None => None,
+            },
+            interface_report: Some(interface_report),
         })
     }
 
     async fn apply_config(&self, config: ConfigUpdate) -> Result<()> {
         #[derive(serde::Deserialize)]
+        struct NatConfigUpdate {
+            selected_interface_name: Option<Option<String>>,
+            bind_ip: Option<Option<String>>,
+            selection_confirmed: Option<bool>,
+            enabled: Option<bool>,
+            igd_ip: Option<Option<String>>,
+            external_ip_override: Option<Option<String>>,
+        }
+
+        #[derive(serde::Deserialize)]
         struct LiveConfigUpdate {
             kad: Option<KadConfig>,
-            nat: Option<overlord_agent_nat::NatConfig>,
+            nat: Option<NatConfigUpdate>,
         }
 
         let next: LiveConfigUpdate = serde_json::from_value(config.config)
@@ -868,27 +1019,53 @@ impl IndexerService for OverlordAgentEmule {
             guard.kad = kad;
         }
         if let Some(nat) = next.nat {
-            guard.nat = nat;
+            if let Some(selected_interface_name) = nat.selected_interface_name {
+                guard.nat.selected_interface_name = selected_interface_name;
+            }
+            if let Some(bind_ip) = nat.bind_ip {
+                guard.nat.bind_ip = bind_ip;
+            }
+            if let Some(selection_confirmed) = nat.selection_confirmed {
+                guard.nat.selection_confirmed = selection_confirmed;
+            }
+            if let Some(enabled) = nat.enabled {
+                guard.nat.enabled = enabled;
+            }
+            if let Some(igd_ip) = nat.igd_ip {
+                guard.nat.igd_ip = igd_ip;
+            }
+            if let Some(external_ip_override) = nat.external_ip_override {
+                guard.nat.external_ip_override = external_ip_override;
+            }
         }
-        anyhow::bail!("live Kad config updates are not supported yet; restart the agent")
+        drop(guard);
+        self.reconcile_runtime().await
     }
 
     async fn seed_popular(&self, hashes: Vec<PopularHash>) -> Result<()> {
-        seed_popular_impl(&self.dht, hashes).await
+        let runtime = self.runtime.lock().await.clone();
+        let Some(runtime) = runtime else {
+            anyhow::bail!("agent networking is waiting for interface selection");
+        };
+        seed_popular_impl(&runtime.dht, hashes).await
     }
 
     async fn flush_snoop(&self) -> Result<Vec<SnoopEntry>> {
         let queue = self.snoop_queue.lock().await;
         Ok(queue.values().cloned().collect())
     }
+
+    async fn interfaces(&self) -> Result<AgentInterfaceReport> {
+        Ok(self.interface_report().await)
+    }
 }
 
 impl OverlordAgentEmule {
-    async fn spawn_background_tasks(&self) {
-        let dht = self.dht.clone();
-        let shutdown = Arc::clone(&self.shutdown);
+    async fn spawn_background_tasks(&self, runtime: &AgentNetworkRuntime, config: &EmuleAgentConfig) {
+        let dht = runtime.dht.clone();
+        let shutdown = Arc::clone(&runtime.shutdown);
         let state_paths = self.state_paths.clone();
-        self.tasks.lock().await.push(tokio::spawn(async move {
+        runtime.tasks.lock().await.push(tokio::spawn(async move {
             while !shutdown.load(Ordering::Relaxed) && !dht.is_bootstrapped() {
                 match dht.bootstrap().await {
                     Ok(()) => {
@@ -903,10 +1080,10 @@ impl OverlordAgentEmule {
             }
         }));
 
-        let dht = self.dht.clone();
-        let shutdown = Arc::clone(&self.shutdown);
+        let dht = runtime.dht.clone();
+        let shutdown = Arc::clone(&runtime.shutdown);
         let snoop_queue = Arc::clone(&self.snoop_queue);
-        self.tasks.lock().await.push(tokio::spawn(async move {
+        runtime.tasks.lock().await.push(tokio::spawn(async move {
             let mut packets = dht.subscribe_packets();
             while !shutdown.load(Ordering::Relaxed) {
                 match packets.recv().await {
@@ -926,12 +1103,12 @@ impl OverlordAgentEmule {
         }));
 
         let coordinator = self.coordinator.clone();
-        let dht = self.dht.clone();
-        let shutdown = Arc::clone(&self.shutdown);
+        let dht = runtime.dht.clone();
+        let shutdown = Arc::clone(&runtime.shutdown);
         let snoop_queue = Arc::clone(&self.snoop_queue);
         let indexer_id = self.indexer_id;
-        let passive_result_count = Arc::clone(&self.passive_result_count);
-        self.tasks.lock().await.push(tokio::spawn(async move {
+        let passive_result_count = Arc::clone(&runtime.passive_result_count);
+        runtime.tasks.lock().await.push(tokio::spawn(async move {
             while !shutdown.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_secs(PASSIVE_CRAWL_SECS)).await;
                 if shutdown.load(Ordering::Relaxed) || !dht.is_bootstrapped() {
@@ -974,10 +1151,10 @@ impl OverlordAgentEmule {
         }));
 
         let coordinator = self.coordinator.clone();
-        let shutdown = Arc::clone(&self.shutdown);
+        let shutdown = Arc::clone(&runtime.shutdown);
         let snoop_queue = Arc::clone(&self.snoop_queue);
         let indexer_id = self.indexer_id;
-        self.tasks.lock().await.push(tokio::spawn(async move {
+        runtime.tasks.lock().await.push(tokio::spawn(async move {
             while !shutdown.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_secs(SNOOP_FLUSH_SECS)).await;
                 if shutdown.load(Ordering::Relaxed) {
@@ -991,10 +1168,10 @@ impl OverlordAgentEmule {
         }));
 
         let coordinator = self.coordinator.clone();
-        let dht = self.dht.clone();
-        let shutdown = Arc::clone(&self.shutdown);
-        let republish_secs = self.config.read().await.kad.republish_interval_secs;
-        self.tasks.lock().await.push(tokio::spawn(async move {
+        let dht = runtime.dht.clone();
+        let shutdown = Arc::clone(&runtime.shutdown);
+        let republish_secs = config.kad.republish_interval_secs;
+        runtime.tasks.lock().await.push(tokio::spawn(async move {
             while !shutdown.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_secs(republish_secs)).await;
                 if shutdown.load(Ordering::Relaxed) || !dht.is_bootstrapped() {

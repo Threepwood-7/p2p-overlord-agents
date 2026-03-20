@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use reqwest::Url;
 
 use crate::types::{
-    IndexerRegistration, PopularHash, RegisterRequest, RegistrationResponse, ResultBatch,
-    SearchJob, SnoopEntry,
+    AgentInterfaceReport, ConfigUpdate, IndexerRegistration, IndexerStats, PopularHash,
+    RegisterRequest, RegistrationResponse, ResultBatch, SearchJob, SnoopEntry,
 };
 
 #[derive(Clone)]
@@ -95,5 +95,40 @@ impl CoordinatorClient {
             .error_for_status()?
             .json::<Vec<PopularHash>>()
             .await?)
+    }
+
+    pub async fn stats(&self) -> Result<IndexerStats> {
+        let url = self.base_url.join("/api/internal/stats")?;
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<IndexerStats>()
+            .await?)
+    }
+
+    pub async fn interfaces(&self) -> Result<AgentInterfaceReport> {
+        let url = self.base_url.join("/api/internal/interfaces")?;
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AgentInterfaceReport>()
+            .await?)
+    }
+
+    pub async fn apply_config_update(&self, payload: &ConfigUpdate) -> Result<()> {
+        let url = self.base_url.join("/api/internal/config-update")?;
+        self.http
+            .post(url)
+            .json(payload)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 }
