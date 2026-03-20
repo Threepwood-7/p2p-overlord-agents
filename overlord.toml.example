@@ -10,6 +10,7 @@ version = "0.1.0"
 
 [kad]
 udp_bind_addr = "0.0.0.0:41000"
+ed2k_bind_addr = "0.0.0.0:41001"
 nodes_dat_path = "./runtime/overlord-kad.nodes.dat"
 bootstrap_nodes = []
 search_timeout_secs = 45
@@ -22,6 +23,16 @@ source_result_cap = 1000
 notes_result_cap = 1000
 obfuscation_enabled = true
 enable_mock_results = false
+
+[nat]
+enabled = false
+backend_order = ["upnp"]
+bind_ip = ""
+igd_ip = ""
+discovery_timeout_secs = 5
+lease_duration_secs = 3600
+renew_margin_secs = 300
+external_ip_override = ""
 
 [log]
 level = "info"

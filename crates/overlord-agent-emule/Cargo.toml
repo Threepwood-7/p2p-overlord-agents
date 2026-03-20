@@ -12,6 +12,7 @@ chrono.workspace = true
 hex = "0.4"
 md4 = "0.10"
 overlord-agent-common = { path = "../overlord-agent-common" }
+overlord-agent-nat = { path = "../overlord-agent-nat" }
 overlord-kad-dht = { path = "../overlord-kad-dht" }
 overlord-kad-proto = { path = "../overlord-kad-proto" }
 overlord-kad-routing = { path = "../overlord-kad-routing" }

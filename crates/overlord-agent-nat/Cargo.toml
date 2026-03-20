@@ -1,0 +1,16 @@
+[package]
+name = "overlord-agent-nat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared NAT reachability and port mapping support for Overlord agents"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+rupnp = "3"
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+

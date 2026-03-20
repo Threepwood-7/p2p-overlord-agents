@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use overlord_agent_nat::NatStatusSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -79,6 +80,7 @@ pub struct IndexerStats {
     pub snoop_queue_depth: u32,
     pub staging_queue_depth: u32,
     pub uptime_secs: u64,
+    pub nat: Option<NatStatusSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

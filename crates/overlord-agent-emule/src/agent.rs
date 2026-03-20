@@ -15,6 +15,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use md4::{Digest, Md4};
+use overlord_agent_nat::{
+    MappingExposure, MappingSpec, NatCapableAgent, NatManager, NatManagerBuilder,
+    RupnpPortMappingProvider, TransportProtocol,
+};
 use tokio::{
     sync::{Mutex, RwLock},
     task::JoinHandle,
@@ -58,6 +62,7 @@ pub struct OverlordAgentEmule {
     coordinator: CoordinatorClient,
     indexer_id: Uuid,
     dht: DhtNode,
+    nat: Arc<NatManager>,
     started_at: Instant,
     state_paths: AgentStatePaths,
     snoop_queue: Arc<Mutex<HashMap<String, SnoopEntry>>>,
@@ -107,11 +112,19 @@ impl OverlordAgentEmule {
         })
         .await?;
 
+        let nat = Arc::new(
+            NatManagerBuilder::new(config.nat.clone())
+                .with_mappings(Self::nat_mappings_from_config(&config)?)
+                .with_provider(Arc::new(RupnpPortMappingProvider))
+                .build(),
+        );
+
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             coordinator,
             indexer_id,
             dht,
+            nat,
             started_at: Instant::now(),
             state_paths,
             snoop_queue: Arc::new(Mutex::new(HashMap::new())),
@@ -151,6 +164,36 @@ impl OverlordAgentEmule {
             .parse()
             .context("invalid agent.bind_addr")?;
         IndexerServer::new(self).serve(bind_addr).await
+    }
+
+    fn nat_mappings_from_config(config: &EmuleAgentConfig) -> Result<Vec<MappingSpec>> {
+        let kad_addr: SocketAddr = config
+            .kad
+            .udp_bind_addr
+            .parse()
+            .context("invalid kad.udp_bind_addr for NAT mapping")?;
+        let ed2k_addr: SocketAddr = config
+            .kad
+            .ed2k_bind_addr
+            .parse()
+            .context("invalid kad.ed2k_bind_addr for NAT mapping")?;
+
+        Ok(vec![
+            MappingSpec {
+                name: "kad".to_string(),
+                local_addr: kad_addr,
+                protocol: TransportProtocol::Udp,
+                exposure: MappingExposure::Required,
+                preferred_external_port: None,
+            },
+            MappingSpec {
+                name: "ed2k".to_string(),
+                local_addr: ed2k_addr,
+                protocol: TransportProtocol::Tcp,
+                exposure: MappingExposure::Preferred,
+                preferred_external_port: None,
+            },
+        ])
     }
 }
 
@@ -720,6 +763,24 @@ impl AgentStatePaths {
 }
 
 #[async_trait]
+impl NatCapableAgent for OverlordAgentEmule {
+    fn nat_config(&self) -> overlord_agent_nat::NatConfig {
+        self.config
+            .try_read()
+            .map(|config| config.nat.clone())
+            .unwrap_or_default()
+    }
+
+    fn nat_mappings(&self) -> Vec<MappingSpec> {
+        self.config
+            .try_read()
+            .ok()
+            .and_then(|config| Self::nat_mappings_from_config(&config).ok())
+            .unwrap_or_default()
+    }
+}
+
+#[async_trait]
 impl IndexerService for OverlordAgentEmule {
     fn protocol(&self) -> Protocol {
         Protocol::Kad2
@@ -741,6 +802,7 @@ impl IndexerService for OverlordAgentEmule {
         self.shutdown.store(false, Ordering::SeqCst);
         restore_snoop_queue(&self.coordinator, self.indexer_id, &self.snoop_queue).await;
         self.tasks.lock().await.push(self.dht.start());
+        self.nat.start().await?;
         self.spawn_background_tasks().await;
         Ok(())
     }
@@ -754,6 +816,7 @@ impl IndexerService for OverlordAgentEmule {
         for task in tasks {
             task.abort();
         }
+        self.nat.stop().await?;
         flush_snoop_queue(&self.coordinator, self.indexer_id, &self.snoop_queue).await?;
         Ok(())
     }
@@ -787,13 +850,26 @@ impl IndexerService for OverlordAgentEmule {
             snoop_queue_depth: queue_depth,
             staging_queue_depth: 0,
             uptime_secs,
+            nat: Some(self.nat.status().await.snapshot()),
         })
     }
 
     async fn apply_config(&self, config: ConfigUpdate) -> Result<()> {
-        let next_kad: KadConfig = serde_json::from_value(config.config)
-            .context("invalid Kad config payload for overlord-agent-emule")?;
-        self.config.write().await.kad = next_kad;
+        #[derive(serde::Deserialize)]
+        struct LiveConfigUpdate {
+            kad: Option<KadConfig>,
+            nat: Option<overlord_agent_nat::NatConfig>,
+        }
+
+        let next: LiveConfigUpdate = serde_json::from_value(config.config)
+            .context("invalid config payload for overlord-agent-emule")?;
+        let mut guard = self.config.write().await;
+        if let Some(kad) = next.kad {
+            guard.kad = kad;
+        }
+        if let Some(nat) = next.nat {
+            guard.nat = nat;
+        }
         anyhow::bail!("live Kad config updates are not supported yet; restart the agent")
     }
 
