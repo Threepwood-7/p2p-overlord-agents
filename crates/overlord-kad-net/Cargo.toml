@@ -1,0 +1,19 @@
+[package]
+name = "overlord-kad-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kad2 network layer — UDP transport, RPC manager, obfuscation"
+
+[dependencies]
+overlord-kad-proto = { path = "../overlord-kad-proto" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
+sha2 = "0.10"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

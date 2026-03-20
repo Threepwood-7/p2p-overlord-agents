@@ -32,8 +32,17 @@ pub struct AgentConfig {
 #[serde(default)]
 pub struct KadConfig {
     pub udp_bind_addr: String,
+    pub nodes_dat_path: String,
     pub bootstrap_nodes: Vec<String>,
     pub search_timeout_secs: u64,
+    pub store_timeout_secs: u64,
+    pub republish_interval_secs: u64,
+    pub max_outbound_pps: u32,
+    pub search_phase2_fanout: usize,
+    pub keyword_result_cap: usize,
+    pub source_result_cap: usize,
+    pub notes_result_cap: usize,
+    pub obfuscation_enabled: bool,
     pub enable_mock_results: bool,
 }
 
@@ -78,9 +87,18 @@ impl Default for KadConfig {
     fn default() -> Self {
         Self {
             udp_bind_addr: "0.0.0.0:41000".to_string(),
+            nodes_dat_path: "./runtime/overlord-kad.nodes.dat".to_string(),
             bootstrap_nodes: Vec::new(),
-            search_timeout_secs: 8,
-            enable_mock_results: true,
+            search_timeout_secs: 45,
+            store_timeout_secs: 140,
+            republish_interval_secs: 18_000,
+            max_outbound_pps: 50,
+            search_phase2_fanout: 50,
+            keyword_result_cap: 5_000,
+            source_result_cap: 1_000,
+            notes_result_cap: 1_000,
+            obfuscation_enabled: true,
+            enable_mock_results: false,
         }
     }
 }

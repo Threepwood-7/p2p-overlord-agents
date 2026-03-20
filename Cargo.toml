@@ -2,6 +2,10 @@
 members = [
     "crates/overlord-agent-common",
     "crates/overlord-agent-emule",
+    "crates/overlord-kad-proto",
+    "crates/overlord-kad-routing",
+    "crates/overlord-kad-net",
+    "crates/overlord-kad-dht",
 ]
 resolver = "2"
 
@@ -14,10 +18,14 @@ version = "0.1.0"
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
+binrw = "0.14"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "1"
 tokio = { version = "1", features = ["full"] }
 toml = "0.9"
 tracing = "0.1"

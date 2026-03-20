@@ -1,0 +1,10 @@
+[package]
+name = "overlord-kad-routing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kad2 routing table — zone tree, k-buckets, contacts"
+
+[dependencies]
+overlord-kad-proto = { path = "../overlord-kad-proto" }
+thiserror = { workspace = true }

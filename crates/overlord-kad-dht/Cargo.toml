@@ -1,0 +1,20 @@
+[package]
+name = "overlord-kad-dht"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kad2 DHT operations — bootstrap, lookup, search, publish"
+
+[dependencies]
+overlord-kad-proto = { path = "../overlord-kad-proto" }
+overlord-kad-routing = { path = "../overlord-kad-routing" }
+overlord-kad-net = { path = "../overlord-kad-net" }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+binrw = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
