@@ -16,14 +16,15 @@ use async_trait::async_trait;
 use chrono::Utc;
 use md4::{Digest, Md4};
 use overlord_agent_nat::{
-    AgentInterface, AgentNatConfig, AgentNetworkReport, InterfaceBindingSelection,
+    AgentInterface, AgentNatConfig, AgentNetworkReport, AgentNetworkingConfig,
+    InterfaceBindingSelection,
     InterfaceSelectionState,
     MappingExposure, MappingSpec, NatCapableAgent, NatManager, NatManagerBuilder,
     ResolvedInterfaceBindingReport, RupnpPortMappingProvider, TransportProtocol,
     build_interface_binding_report, detect_interfaces, recommend_interface, resolve_bind_ip,
 };
 use tokio::{
-    sync::{Mutex, RwLock},
+    sync::{Mutex, Notify, RwLock},
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
@@ -31,7 +32,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use overlord_agent_common::{
-    ConfigUpdate, ContentType, CoordinatorClient, FileRecord, HashType, IndexerServer,
+    AgentInterfacesView, ConfigUpdate, ContentType, CoordinatorClient, FileRecord, HashType, IndexerServer,
     IndexerService, IndexerStats, PopularHash, Protocol, RegisterRequest, ResultBatch,
     RunningIndexerServer, SearchJob, SnoopEntry, Source, TagEntry,
 };
@@ -58,6 +59,7 @@ struct AgentStatePaths {
     node_id_path: PathBuf,
     udp_key_path: PathBuf,
     nodes_dat_path: PathBuf,
+    networking_config_path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -85,19 +87,26 @@ pub struct OverlordAgentEmule {
     control_server: Arc<Mutex<Option<ControlServerRuntime>>>,
     control_selection_state: Arc<RwLock<ResolvedInterfaceBindingReport>>,
     p2p_selection_state: Arc<RwLock<ResolvedInterfaceBindingReport>>,
-    control_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    control_rebind_requested: Arc<AtomicBool>,
+    restart_requested: Arc<AtomicBool>,
+    restart_notify: Arc<Notify>,
     started: AtomicBool,
 }
 
+pub enum AgentExit {
+    Stopped,
+    RestartRequested,
+}
+
 impl OverlordAgentEmule {
-    pub async fn new(config: EmuleAgentConfig) -> Result<Self> {
+    pub async fn new(mut config: EmuleAgentConfig) -> Result<Self> {
+        load_persisted_networking_config(&mut config)?;
         let indexer_id = load_or_create_indexer_id(&config.agent.indexer_id_path)?;
         let coordinator = CoordinatorClient::new(&config.coordinator.url)?;
         let state_paths = AgentStatePaths::from_config(&config);
         ensure_parent_dir(&state_paths.node_id_path)?;
         ensure_parent_dir(&state_paths.udp_key_path)?;
         ensure_parent_dir(&state_paths.nodes_dat_path)?;
+        ensure_parent_dir(&state_paths.networking_config_path)?;
         let interfaces = detect_interfaces().unwrap_or_default();
         let control_selection_state =
             Self::resolve_control_selection_state(&config, &interfaces, None, false, false);
@@ -115,8 +124,8 @@ impl OverlordAgentEmule {
             control_server: Arc::new(Mutex::new(None)),
             control_selection_state: Arc::new(RwLock::new(control_selection_state)),
             p2p_selection_state: Arc::new(RwLock::new(p2p_selection_state)),
-            control_tasks: Arc::new(Mutex::new(Vec::new())),
-            control_rebind_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(AtomicBool::new(false)),
+            restart_notify: Arc::new(Notify::new()),
             started: AtomicBool::new(false),
         })
     }
@@ -141,20 +150,31 @@ impl OverlordAgentEmule {
         Ok(())
     }
 
-    pub async fn serve(self: Arc<Self>) -> Result<()> {
+    pub async fn serve(self: Arc<Self>) -> Result<AgentExit> {
         let config = self.config.read().await.clone();
-        let bind_addr = Self::bootstrap_control_bind_addr(&config)?;
+        let bind_addr = Self::startup_control_bind_addr(&config)?;
         self.start_control_server_with_retry(bind_addr).await?;
         self.register_with_coordinator().await?;
-        self.spawn_control_tasks().await;
 
-        tokio::signal::ctrl_c()
-            .await
-            .context("failed while waiting for ctrl-c")?;
+        if self.sync_networking_config_from_coordinator().await? {
+            self.stop().await?;
+            self.stop_control_server().await?;
+            return Ok(AgentExit::RestartRequested);
+        }
+
+        tokio::select! {
+            ctrl_c = tokio::signal::ctrl_c() => {
+                ctrl_c.context("failed while waiting for ctrl-c")?;
+            }
+            _ = self.restart_notify.notified() => {}
+        }
         self.stop().await?;
-        self.stop_control_tasks().await;
         self.stop_control_server().await?;
-        Ok(())
+        Ok(if self.restart_requested.load(Ordering::SeqCst) {
+            AgentExit::RestartRequested
+        } else {
+            AgentExit::Stopped
+        })
     }
 
     fn control_selection(config: &EmuleAgentConfig) -> InterfaceBindingSelection {
@@ -186,8 +206,32 @@ impl OverlordAgentEmule {
         }
     }
 
+    fn networking_config(config: &EmuleAgentConfig) -> AgentNetworkingConfig {
+        AgentNetworkingConfig {
+            control: Self::control_selection(config),
+            p2p: Self::p2p_selection(config),
+            nat: Self::desired_nat_config(config),
+        }
+    }
+
     fn bootstrap_control_bind_addr(config: &EmuleAgentConfig) -> Result<SocketAddr> {
         resolved_socket_addr(&config.agent.bind_addr, None).context("invalid agent.bind_addr")
+    }
+
+    fn startup_control_bind_addr(config: &EmuleAgentConfig) -> Result<SocketAddr> {
+        let interfaces = detect_interfaces().unwrap_or_default();
+        let selection = Self::control_selection(config);
+        if selection.selection_confirmed {
+            if let Some(bind_ip) = resolve_bind_ip(
+                &interfaces,
+                selection.selected_interface_name.as_deref(),
+                selection.bind_ip.as_deref(),
+            ) {
+                return Self::selected_control_bind_addr(config, Some(&bind_ip));
+            }
+        }
+
+        Self::bootstrap_control_bind_addr(config)
     }
 
     fn selected_control_bind_addr(config: &EmuleAgentConfig, bind_ip: Option<&str>) -> Result<SocketAddr> {
@@ -315,24 +359,9 @@ impl OverlordAgentEmule {
         Ok(())
     }
 
-    async fn spawn_control_tasks(self: &Arc<Self>) {
-        let agent = Arc::clone(self);
-        self.control_tasks.lock().await.push(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                if agent.control_rebind_requested.swap(false, Ordering::SeqCst) {
-                    if let Err(error) = agent.rebind_control_server().await {
-                        warn!("control rebind failed: {error}");
-                    }
-                }
-            }
-        }));
-    }
-
-    async fn stop_control_tasks(&self) {
-        for task in std::mem::take(&mut *self.control_tasks.lock().await) {
-            task.abort();
-        }
+    fn request_restart(&self) {
+        self.restart_requested.store(true, Ordering::SeqCst);
+        self.restart_notify.notify_waiters();
     }
 
     fn nat_mappings_from_config(config: &EmuleAgentConfig, bind_ip: Option<&str>) -> Result<Vec<MappingSpec>> {
@@ -359,56 +388,29 @@ impl OverlordAgentEmule {
         ])
     }
 
-    async fn rebind_control_server(self: &Arc<Self>) -> Result<()> {
-        let config = self.config.read().await.clone();
-        let interfaces = detect_interfaces().unwrap_or_default();
-        let selection = Self::control_selection(&config);
-        let target_bind_addr = if selection.selection_confirmed {
-            if let Some(bind_ip) = resolve_bind_ip(
-                &interfaces,
-                selection.selected_interface_name.as_deref(),
-                selection.bind_ip.as_deref(),
-            ) {
-                Self::selected_control_bind_addr(&config, Some(&bind_ip))?
-            } else {
-                Self::bootstrap_control_bind_addr(&config)?
-            }
-        } else {
-            Self::bootstrap_control_bind_addr(&config)?
-        };
+    async fn sync_networking_config_from_coordinator(&self) -> Result<bool> {
+        let view = self.coordinator.agent_interfaces_view(self.indexer_id).await?;
+        self.sync_networking_config_from_view(&view).await
+    }
 
-        self.stop_control_server().await?;
+    async fn sync_networking_config_from_view(&self, view: &AgentInterfacesView) -> Result<bool> {
+        let current = self
+            .config
+            .try_read()
+            .map(|config| Self::networking_config(&config))
+            .unwrap_or_else(|_| empty_networking_config());
 
-        let mut runtime_error = None;
-        if let Err(error) = self.start_control_server_with_retry(target_bind_addr).await {
-            runtime_error = Some(error.to_string());
-            let fallback_bind_addr = Self::bootstrap_control_bind_addr(&config)?;
-            self.start_control_server_with_retry(fallback_bind_addr).await?;
+        if current == view.config {
+            return Ok(false);
         }
 
-        self.register_with_coordinator().await?;
+        {
+            let mut guard = self.config.write().await;
+            apply_networking_config(&mut guard, &view.config);
+            persist_networking_config(&self.state_paths, &view.config)?;
+        }
 
-        let current_bind_addr = self.current_control_bind_addr().await;
-        let desired_bind_ip = resolve_bind_ip(
-            &interfaces,
-            selection.selected_interface_name.as_deref(),
-            selection.bind_ip.as_deref(),
-        );
-        let applied = selection.selection_confirmed
-            && current_bind_addr.is_some_and(|bind_addr| {
-                desired_bind_ip
-                    .as_ref()
-                    .is_some_and(|resolved_ip| bind_addr.ip().to_string() == *resolved_ip)
-            });
-        let state = Self::resolve_control_selection_state(
-            &config,
-            &interfaces,
-            runtime_error,
-            current_bind_addr.is_some(),
-            applied,
-        );
-        *self.control_selection_state.write().await = state;
-        Ok(())
+        Ok(true)
     }
 
     async fn interface_report(&self) -> AgentNetworkReport {
@@ -1153,8 +1155,81 @@ impl AgentStatePaths {
             node_id_path: state_dir.join("overlord-kad.node-id"),
             udp_key_path: state_dir.join("overlord-kad.udp-key"),
             nodes_dat_path,
+            networking_config_path: state_dir.join("overlord-agent.networking.json"),
         }
     }
+}
+
+fn empty_networking_config() -> AgentNetworkingConfig {
+    AgentNetworkingConfig {
+        control: InterfaceBindingSelection {
+            selected_interface_name: None,
+            bind_ip: None,
+            selection_confirmed: false,
+        },
+        p2p: InterfaceBindingSelection {
+            selected_interface_name: None,
+            bind_ip: None,
+            selection_confirmed: false,
+        },
+        nat: AgentNatConfig {
+            enabled: false,
+            backend_order: vec!["upnp".to_string()],
+            igd_ip: None,
+            external_ip_override: None,
+        },
+    }
+}
+
+fn apply_networking_config(config: &mut EmuleAgentConfig, desired: &AgentNetworkingConfig) {
+    config.agent.control_selected_interface_name = desired.control.selected_interface_name.clone();
+    config.agent.control_bind_ip = desired.control.bind_ip.clone();
+    config.agent.control_selection_confirmed = desired.control.selection_confirmed;
+    config.nat.selected_interface_name = desired.p2p.selected_interface_name.clone();
+    config.nat.bind_ip = desired.p2p.bind_ip.clone();
+    config.nat.selection_confirmed = desired.p2p.selection_confirmed;
+    config.nat.enabled = desired.nat.enabled;
+    config.nat.backend_order = if desired.nat.backend_order.is_empty() {
+        vec!["upnp".to_string()]
+    } else {
+        desired.nat.backend_order.clone()
+    };
+    config.nat.igd_ip = desired.nat.igd_ip.clone();
+    config.nat.external_ip_override = desired.nat.external_ip_override.clone();
+}
+
+fn load_persisted_networking_config(config: &mut EmuleAgentConfig) -> Result<()> {
+    let state_paths = AgentStatePaths::from_config(config);
+    if !state_paths.networking_config_path.exists() {
+        return Ok(());
+    }
+
+    let contents = fs::read_to_string(&state_paths.networking_config_path).with_context(|| {
+        format!(
+            "failed to read networking state from {}",
+            state_paths.networking_config_path.display()
+        )
+    })?;
+    let desired: AgentNetworkingConfig = serde_json::from_str(&contents).with_context(|| {
+        format!(
+            "failed to parse networking state from {}",
+            state_paths.networking_config_path.display()
+        )
+    })?;
+    apply_networking_config(config, &desired);
+    Ok(())
+}
+
+fn persist_networking_config(state_paths: &AgentStatePaths, desired: &AgentNetworkingConfig) -> Result<()> {
+    ensure_parent_dir(&state_paths.networking_config_path)?;
+    let payload = serde_json::to_vec_pretty(desired).context("failed to serialize networking state")?;
+    fs::write(&state_paths.networking_config_path, payload).with_context(|| {
+        format!(
+            "failed to persist networking state to {}",
+            state_paths.networking_config_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 #[async_trait]
@@ -1338,12 +1413,16 @@ impl IndexerService for OverlordAgentEmule {
         let new_control = Self::control_selection(&guard);
         let new_p2p = Self::p2p_selection(&guard);
         let new_nat = Self::desired_nat_config(&guard);
+        let new_networking = Self::networking_config(&guard);
         drop(guard);
-        if kad_changed || old_nat != new_nat || old_p2p != new_p2p {
-            self.reconcile_runtime().await?;
+        let networking_changed = old_control != new_control || old_p2p != new_p2p || old_nat != new_nat;
+        if networking_changed {
+            persist_networking_config(&self.state_paths, &new_networking)?;
+            self.request_restart();
+            return Ok(());
         }
-        if old_control != new_control {
-            self.control_rebind_requested.store(true, Ordering::SeqCst);
+        if kad_changed {
+            self.reconcile_runtime().await?;
         }
         Ok(())
     }

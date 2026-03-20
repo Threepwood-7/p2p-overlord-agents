@@ -1,9 +1,9 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, process::Command, sync::Arc};
 
 use anyhow::Result;
 use clap::Parser;
 use overlord_agent_common::IndexerService;
-use overlord_agent_emule::{EmuleAgentConfig, OverlordAgentEmule};
+use overlord_agent_emule::{AgentExit, EmuleAgentConfig, OverlordAgentEmule};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -30,6 +30,21 @@ async fn main() -> Result<()> {
     agent.start().await?;
 
     info!("starting overlord-agent-emule control server");
-    agent.serve().await?;
+    match agent.serve().await? {
+        AgentExit::Stopped => {}
+        AgentExit::RestartRequested => {
+            info!("restarting overlord-agent-emule process");
+            restart_self(&config_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn restart_self(config_path: &PathBuf) -> Result<()> {
+    let current_exe = std::env::current_exe()?;
+    Command::new(current_exe)
+        .arg("--config")
+        .arg(config_path)
+        .spawn()?;
     Ok(())
 }

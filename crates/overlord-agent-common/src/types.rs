@@ -132,3 +132,12 @@ pub struct IndexerRegistration {
 pub struct RegistrationResponse {
     pub registered: IndexerRegistration,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentInterfacesView {
+    pub registration: IndexerRegistration,
+    pub report: Option<AgentNetworkReport>,
+    pub config: AgentNetworkingConfig,
+    pub nat: Option<NatStatusSnapshot>,
+    pub last_error: Option<String>,
+}

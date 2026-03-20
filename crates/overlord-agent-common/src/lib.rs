@@ -13,7 +13,7 @@ pub use overlord_agent_nat::{
 pub use server::{IndexerServer, RunningIndexerServer};
 pub use service::IndexerService;
 pub use types::{
-    ConfigUpdate, ContentType, FileRecord, HashType, IndexerRegistration, IndexerStats,
+    AgentInterfacesView, ConfigUpdate, ContentType, FileRecord, HashType, IndexerRegistration, IndexerStats,
     PopularHash, Protocol, RegisterRequest, RegistrationResponse, ResultBatch, SearchJob,
     SnoopEntry, Source, TagEntry,
 };

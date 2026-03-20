@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Url;
 
 use crate::types::{
-    AgentNetworkReport, ConfigUpdate, IndexerRegistration, IndexerStats, PopularHash,
+    AgentInterfacesView, AgentNetworkReport, ConfigUpdate, IndexerRegistration, IndexerStats, PopularHash,
     RegisterRequest, RegistrationResponse, ResultBatch, SearchJob, SnoopEntry,
 };
 
@@ -118,6 +118,20 @@ impl CoordinatorClient {
             .await?
             .error_for_status()?
             .json::<AgentNetworkReport>()
+            .await?)
+    }
+
+    pub async fn agent_interfaces_view(&self, indexer_id: uuid::Uuid) -> Result<AgentInterfacesView> {
+        let url = self
+            .base_url
+            .join(&format!("/api/agents/{indexer_id}/interfaces"))?;
+        Ok(self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AgentInterfacesView>()
             .await?)
     }
 
