@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -11,7 +12,8 @@ use rupnp::{
     Device, Service,
     ssdp::{SearchTarget, URN},
 };
-use tokio::sync::RwLock;
+use socket2::{Domain, Protocol, Socket, Type};
+use tokio::{net::UdpSocket, sync::RwLock};
 
 use crate::{
     config::NatConfig,
@@ -235,31 +237,51 @@ impl GatewayHandle {
 }
 
 async fn discover_gateway(config: &NatConfig) -> Result<GatewayHandle> {
-    if let Some(ip) = config.bind_ip.as_deref() {
-        ip.parse::<IpAddr>()
-            .with_context(|| format!("invalid nat.bind_ip {ip}"))?;
-    }
+    let bind_ip = config
+        .bind_ip
+        .as_deref()
+        .map(|ip| {
+            ip.parse::<IpAddr>()
+                .with_context(|| format!("invalid nat.bind_ip {ip}"))
+        })
+        .transpose()?;
     let timeout = Duration::from_secs(config.discovery_timeout_secs.max(1));
 
-    for urn in [
-        WAN_IP_CONNECTION_2,
-        WAN_IP_CONNECTION_1,
-        WAN_PPP_CONNECTION_1,
-    ] {
-        let search_target = SearchTarget::URN(urn.clone());
-        let devices = rupnp::discover(&search_target, timeout, None).await?;
+    if let Some(igd_ip) = config.igd_ip.as_deref() {
+        if let Some(gateway) = discover_gateway_from_configured_ip(igd_ip).await? {
+            return Ok(gateway);
+        }
+    }
+
+    let devices = if let Some(bind_ip) = bind_ip {
+        discover_root_devices_via_bind_ip(bind_ip, timeout).await?
+    } else {
+        let devices = rupnp::discover(&SearchTarget::RootDevice, timeout, None).await?;
         let mut devices = Box::pin(devices);
+        let mut discovered = Vec::new();
         while let Some(device) = devices.try_next().await? {
-            if let Some(requested_igd_ip) = config.igd_ip.as_deref() {
-                let matches = device
-                    .url()
-                    .host()
-                    .map(|host| host == requested_igd_ip)
-                    .unwrap_or(false);
-                if !matches {
-                    continue;
-                }
+            discovered.push(device);
+        }
+        discovered
+    };
+
+    for device in devices {
+        if let Some(requested_igd_ip) = config.igd_ip.as_deref() {
+            let matches = device
+                .url()
+                .host()
+                .map(|host| host == requested_igd_ip)
+                .unwrap_or(false);
+            if !matches {
+                continue;
             }
+        }
+
+        for urn in [
+            WAN_IP_CONNECTION_2,
+            WAN_IP_CONNECTION_1,
+            WAN_PPP_CONNECTION_1,
+        ] {
             let service = device.find_service(&urn).cloned();
             if let Some(service) = service {
                 return Ok(GatewayHandle { device, service });
@@ -274,6 +296,37 @@ async fn discover_gateway(config: &NatConfig) -> Result<GatewayHandle> {
     }
 }
 
+async fn discover_gateway_from_configured_ip(igd_ip: &str) -> Result<Option<GatewayHandle>> {
+    let candidate_urls = [
+        format!("http://{igd_ip}:1900/gateDesc.xml"),
+        format!("http://{igd_ip}:1900/rootDesc.xml"),
+        format!("http://{igd_ip}:5000/rootDesc.xml"),
+        format!("http://{igd_ip}:49152/rootDesc.xml"),
+    ];
+
+    for candidate in candidate_urls {
+        let uri = match candidate.parse() {
+            Ok(uri) => uri,
+            Err(_) => continue,
+        };
+        let device = match Device::from_url(uri).await {
+            Ok(device) => device,
+            Err(_) => continue,
+        };
+        for urn in [
+            WAN_IP_CONNECTION_2,
+            WAN_IP_CONNECTION_1,
+            WAN_PPP_CONNECTION_1,
+        ] {
+            if let Some(service) = device.find_service(&urn).cloned() {
+                return Ok(Some(GatewayHandle { device, service }));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -283,15 +336,97 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+async fn discover_root_devices_via_bind_ip(
+    bind_ip: IpAddr,
+    timeout: Duration,
+) -> Result<Vec<Device>> {
+    let bind_addr = SocketAddr::new(bind_ip, 0);
+    let local_v4 = match bind_ip {
+        IpAddr::V4(ip) => ip,
+        IpAddr::V6(_) => anyhow::bail!("IPv6 bind_ip is not supported for UPnP v1"),
+    };
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        .context("failed to create SSDP socket")?;
+    socket
+        .set_reuse_address(true)
+        .context("failed to set SSDP reuse-address")?;
+    socket
+        .set_multicast_ttl_v4(2)
+        .context("failed to set SSDP multicast TTL")?;
+    socket
+        .set_multicast_if_v4(&local_v4)
+        .context("failed to set SSDP multicast interface")?;
+    socket
+        .bind(&bind_addr.into())
+        .with_context(|| format!("failed to bind SSDP socket to {bind_addr}"))?;
+    socket
+        .set_nonblocking(true)
+        .context("failed to switch SSDP socket to nonblocking mode")?;
+    let socket = UdpSocket::from_std(socket.into())
+        .context("failed to convert SSDP socket for tokio")?;
+
+    let search = format!(
+        "M-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nMan:\"ssdp:discover\"\r\nST: {}\r\nMX: 2\r\n\r\n",
+        SearchTarget::RootDevice
+    );
+    let multicast_addr: SocketAddr = "239.255.255.250:1900".parse().unwrap();
+    socket
+        .send_to(search.as_bytes(), multicast_addr)
+        .await
+        .context("failed to send SSDP discovery packet")?;
+
+    let started = tokio::time::Instant::now();
+    let mut locations = HashSet::new();
+    let mut devices = Vec::new();
+    while started.elapsed() < timeout {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let mut buffer = [0u8; 4096];
+        let read = match tokio::time::timeout(remaining, socket.recv_from(&mut buffer)).await {
+            Ok(Ok((read, _from))) => read,
+            Ok(Err(error)) => return Err(error).context("failed to receive SSDP response"),
+            Err(_) => break,
+        };
+        let text = std::str::from_utf8(&buffer[..read]).context("invalid SSDP response payload")?;
+        if let Some(location) = extract_location_header(text) {
+            if locations.insert(location.clone()) {
+                let uri = location
+                    .parse()
+                    .with_context(|| format!("invalid SSDP location URI {location}"))?;
+                if let Ok(device) = Device::from_url(uri).await {
+                    devices.push(device);
+                }
+            }
+        }
+    }
+    Ok(devices)
+}
+
+fn extract_location_header(response: &str) -> Option<String> {
+    response.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("location")
+            .then(|| value.trim().to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::xml_escape;
+    use super::{extract_location_header, xml_escape};
 
     #[test]
     fn xml_escape_covers_port_mapping_description_chars() {
         assert_eq!(
             xml_escape("udp & tcp <nat> 'map' \"desc\""),
             "udp &amp; tcp &lt;nat&gt; &apos;map&apos; &quot;desc&quot;"
+        );
+    }
+
+    #[test]
+    fn extract_location_header_is_case_insensitive() {
+        let response = "HTTP/1.1 200 OK\r\nLOCATION: http://10.0.0.1/root.xml\r\nST: upnp:rootdevice\r\n\r\n";
+        assert_eq!(
+            extract_location_header(response).as_deref(),
+            Some("http://10.0.0.1/root.xml")
         );
     }
 }
