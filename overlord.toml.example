@@ -1,0 +1,18 @@
+[coordinator]
+url = "http://127.0.0.1:13300"
+
+[agent]
+bind_addr = "127.0.0.1:13301"
+indexer_id_path = "./runtime/overlord-agent-emule.indexer-id"
+state_dir = "./runtime"
+hostname = "localhost"
+version = "0.1.0"
+
+[kad]
+udp_bind_addr = "0.0.0.0:41000"
+bootstrap_nodes = []
+search_timeout_secs = 8
+enable_mock_results = true
+
+[log]
+level = "info"
