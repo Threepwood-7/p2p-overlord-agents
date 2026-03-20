@@ -76,9 +76,19 @@ pub struct AgentNetworkReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentNetworkSelections {
+pub struct AgentNatConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub backend_order: Vec<String>,
+    pub igd_ip: Option<String>,
+    pub external_ip_override: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentNetworkingConfig {
     pub control: InterfaceBindingSelection,
     pub p2p: InterfaceBindingSelection,
+    pub nat: AgentNatConfig,
 }
 
 pub fn detect_interfaces() -> Result<Vec<AgentInterface>> {

@@ -7,7 +7,7 @@ mod types;
 
 pub use config::NatConfig;
 pub use interfaces::{
-    AgentInterface, AgentInterfaceAddress, AgentNetworkReport, AgentNetworkSelections,
+    AgentInterface, AgentInterfaceAddress, AgentNatConfig, AgentNetworkReport, AgentNetworkingConfig,
     InterfaceAddressFamily, InterfaceBindingReport, InterfaceBindingSelection,
     InterfaceSelectionState, ResolvedInterfaceBindingReport, build_interface_binding_report,
     detect_interfaces, recommend_interface, resolve_bind_ip,

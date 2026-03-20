@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use md4::{Digest, Md4};
 use overlord_agent_nat::{
-    AgentInterface, AgentNetworkReport, InterfaceBindingSelection, InterfaceSelectionState,
+    AgentInterface, AgentNatConfig, AgentNetworkReport, InterfaceBindingSelection,
+    InterfaceSelectionState,
     MappingExposure, MappingSpec, NatCapableAgent, NatManager, NatManagerBuilder,
     ResolvedInterfaceBindingReport, RupnpPortMappingProvider, TransportProtocol,
     build_interface_binding_report, detect_interfaces, recommend_interface, resolve_bind_ip,
@@ -169,6 +170,19 @@ impl OverlordAgentEmule {
             selected_interface_name: config.nat.selected_interface_name.clone(),
             bind_ip: config.nat.bind_ip.clone(),
             selection_confirmed: config.nat.selection_confirmed,
+        }
+    }
+
+    fn desired_nat_config(config: &EmuleAgentConfig) -> AgentNatConfig {
+        AgentNatConfig {
+            enabled: config.nat.enabled,
+            backend_order: if config.nat.backend_order.is_empty() {
+                vec!["upnp".to_string()]
+            } else {
+                config.nat.backend_order.clone()
+            },
+            igd_ip: config.nat.igd_ip.clone(),
+            external_ip_override: config.nat.external_ip_override.clone(),
         }
     }
 
@@ -1253,11 +1267,18 @@ impl IndexerService for OverlordAgentEmule {
         }
 
         #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum NatUpdate {
+            Desired(AgentNatConfig),
+            Legacy(NatConfigUpdate),
+        }
+
+        #[derive(serde::Deserialize)]
         struct LiveConfigUpdate {
             kad: Option<KadConfig>,
             control: Option<InterfaceBindingSelection>,
             p2p: Option<InterfaceBindingSelection>,
-            nat: Option<NatConfigUpdate>,
+            nat: Option<NatUpdate>,
         }
 
         let next: LiveConfigUpdate = serde_json::from_value(config.config)
@@ -1265,8 +1286,8 @@ impl IndexerService for OverlordAgentEmule {
         let mut guard = self.config.write().await;
         let old_control = Self::control_selection(&guard);
         let old_p2p = Self::p2p_selection(&guard);
+        let old_nat = Self::desired_nat_config(&guard);
         let kad_changed = next.kad.is_some();
-        let nat_changed = next.nat.is_some();
         if let Some(kad) = next.kad {
             guard.kad = kad;
         }
@@ -1281,29 +1302,44 @@ impl IndexerService for OverlordAgentEmule {
             guard.nat.selection_confirmed = p2p.selection_confirmed;
         }
         if let Some(nat) = next.nat {
-            if let Some(selected_interface_name) = nat.selected_interface_name {
-                guard.nat.selected_interface_name = selected_interface_name;
-            }
-            if let Some(bind_ip) = nat.bind_ip {
-                guard.nat.bind_ip = bind_ip;
-            }
-            if let Some(selection_confirmed) = nat.selection_confirmed {
-                guard.nat.selection_confirmed = selection_confirmed;
-            }
-            if let Some(enabled) = nat.enabled {
-                guard.nat.enabled = enabled;
-            }
-            if let Some(igd_ip) = nat.igd_ip {
-                guard.nat.igd_ip = igd_ip;
-            }
-            if let Some(external_ip_override) = nat.external_ip_override {
-                guard.nat.external_ip_override = external_ip_override;
+            match nat {
+                NatUpdate::Desired(nat) => {
+                    guard.nat.enabled = nat.enabled;
+                    guard.nat.backend_order = if nat.backend_order.is_empty() {
+                        vec!["upnp".to_string()]
+                    } else {
+                        nat.backend_order
+                    };
+                    guard.nat.igd_ip = nat.igd_ip;
+                    guard.nat.external_ip_override = nat.external_ip_override;
+                }
+                NatUpdate::Legacy(nat) => {
+                    if let Some(selected_interface_name) = nat.selected_interface_name {
+                        guard.nat.selected_interface_name = selected_interface_name;
+                    }
+                    if let Some(bind_ip) = nat.bind_ip {
+                        guard.nat.bind_ip = bind_ip;
+                    }
+                    if let Some(selection_confirmed) = nat.selection_confirmed {
+                        guard.nat.selection_confirmed = selection_confirmed;
+                    }
+                    if let Some(enabled) = nat.enabled {
+                        guard.nat.enabled = enabled;
+                    }
+                    if let Some(igd_ip) = nat.igd_ip {
+                        guard.nat.igd_ip = igd_ip;
+                    }
+                    if let Some(external_ip_override) = nat.external_ip_override {
+                        guard.nat.external_ip_override = external_ip_override;
+                    }
+                }
             }
         }
         let new_control = Self::control_selection(&guard);
         let new_p2p = Self::p2p_selection(&guard);
+        let new_nat = Self::desired_nat_config(&guard);
         drop(guard);
-        if kad_changed || nat_changed || old_p2p != new_p2p {
+        if kad_changed || old_nat != new_nat || old_p2p != new_p2p {
             self.reconcile_runtime().await?;
         }
         if old_control != new_control {

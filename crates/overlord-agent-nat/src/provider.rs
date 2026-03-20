@@ -117,6 +117,7 @@ impl PortMappingProvider for RupnpPortMappingProvider {
         guard.backend = Some(self.name().to_string());
         guard.bind_ip = config.bind_ip.clone();
         guard.igd_ip = config.igd_ip.clone();
+        guard.external_ip_override = config.external_ip_override.clone();
         guard.gateway = Some(gateway.selected_gateway(external_ip_text.clone()));
         guard.observed_external_addresses = external_ip_text.into_iter().collect();
         guard.mappings = mapped;

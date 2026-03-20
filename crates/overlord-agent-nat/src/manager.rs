@@ -82,12 +82,22 @@ impl NatManager {
             status.enabled = self.config.enabled;
             status.bind_ip = self.config.bind_ip.clone();
             status.igd_ip = self.config.igd_ip.clone();
+            status.external_ip_override = self.config.external_ip_override.clone();
             return Ok(());
         }
 
         let mut slot = self.task.lock().await;
         if slot.is_some() {
             return Ok(());
+        }
+
+        {
+            let mut status = self.status.write().await;
+            status.enabled = self.config.enabled;
+            status.bind_ip = self.config.bind_ip.clone();
+            status.igd_ip = self.config.igd_ip.clone();
+            status.external_ip_override = self.config.external_ip_override.clone();
+            status.last_error = None;
         }
 
         self.shutdown.store(false, Ordering::SeqCst);
@@ -169,6 +179,7 @@ async fn run_manager_loop(
                 guard.enabled = config.enabled;
                 guard.bind_ip = config.bind_ip.clone();
                 guard.igd_ip = config.igd_ip.clone();
+                guard.external_ip_override = config.external_ip_override.clone();
                 guard.last_error = Some(error.to_string());
                 guard.last_refresh_unix_secs = Some(now);
                 drop(guard);
@@ -250,6 +261,7 @@ mod tests {
             guard.enabled = config.enabled;
             guard.bind_ip = config.bind_ip.clone();
             guard.igd_ip = config.igd_ip.clone();
+            guard.external_ip_override = config.external_ip_override.clone();
             guard.gateway_discovered = config.igd_ip.is_some();
             guard.backend = Some(self.name.to_string());
             guard.mappings = mappings
@@ -315,5 +327,28 @@ mod tests {
         assert_eq!(status.bind_ip.as_deref(), Some("192.168.1.10"));
         assert_eq!(status.igd_ip.as_deref(), Some("192.168.1.1"));
         assert_eq!(status.mappings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn start_sets_desired_status_before_reconcile_finishes() {
+        let manager = NatManagerBuilder::new(NatConfig {
+            enabled: true,
+            bind_ip: Some("192.168.1.10".to_string()),
+            igd_ip: Some("192.168.1.1".to_string()),
+            external_ip_override: Some("203.0.113.10".to_string()),
+            ..NatConfig::default()
+        })
+        .with_mappings(vec![sample_mapping()])
+        .build();
+
+        manager.start().await.unwrap();
+        let status = manager.status().await;
+
+        assert!(status.enabled);
+        assert_eq!(status.bind_ip.as_deref(), Some("192.168.1.10"));
+        assert_eq!(status.igd_ip.as_deref(), Some("192.168.1.1"));
+        assert_eq!(status.external_ip_override.as_deref(), Some("203.0.113.10"));
+
+        manager.stop().await.unwrap();
     }
 }
