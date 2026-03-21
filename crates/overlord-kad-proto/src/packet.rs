@@ -240,7 +240,7 @@ pub struct PublishKeyReq {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PublishSourceReq {
     pub target: NodeId,
-    pub source_hash: Ed2kHash,
+    pub publisher_id: NodeId,
     #[br(temp)]
     #[bw(calc = u16::try_from(tags.len()).expect("tag count exceeds u16"))]
     tag_count: u16,
@@ -845,11 +845,13 @@ mod tests {
     fn test_publish_source_req_roundtrip() {
         let pkt = KadPacket::PublishSourceReq(PublishSourceReq {
             target: NodeId::from_bytes([0x44; 16]),
-            source_hash: Ed2kHash::from_bytes([0x55; 16]),
+            publisher_id: NodeId::from_bytes([0x55; 16]),
             tags: vec![Tag::sources(10)],
         });
         let pkt2 = roundtrip(&pkt);
         if let KadPacket::PublishSourceReq(req) = pkt2 {
+            assert_eq!(req.target, NodeId::from_bytes([0x44; 16]));
+            assert_eq!(req.publisher_id, NodeId::from_bytes([0x55; 16]));
             assert_eq!(req.tags.len(), 1);
         } else {
             panic!("wrong type");

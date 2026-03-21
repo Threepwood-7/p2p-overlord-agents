@@ -119,6 +119,73 @@ pub struct IndexerStats {
     pub uptime_secs: u64,
     pub nat: Option<NatStatusSnapshot>,
     pub interface_report: Option<AgentNetworkReport>,
+    pub publish_observability: Option<KadPublishObservability>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishSeedSource {
+    Coordinator,
+    SyntheticFallback,
+    ManualApi,
+}
+
+impl PublishSeedSource {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Coordinator => "coordinator",
+            Self::SyntheticFallback => "synthetic_fallback",
+            Self::ManualApi => "manual_api",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishBatchSummary {
+    pub seed_source: PublishSeedSource,
+    pub published_items: u32,
+    pub closest_contacts_considered: u32,
+    pub attempted_contacts: u32,
+    pub acked_contacts: u32,
+    pub failed_contacts: u32,
+    pub timed_out_contacts: u32,
+    pub completed_at: DateTime<Utc>,
+    pub last_success_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PublishCounters {
+    pub batches: u64,
+    pub published_items: u64,
+    pub closest_contacts_considered: u64,
+    pub attempted_contacts: u64,
+    pub acked_contacts: u64,
+    pub failed_contacts: u64,
+    pub timed_out_contacts: u64,
+    pub last_batch_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLogFileStatus {
+    pub path: String,
+    pub rotation: String,
+    pub max_files: usize,
+    pub last_write_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct KadPublishObservability {
+    pub last_seed_source: Option<PublishSeedSource>,
+    pub last_seed_at: Option<DateTime<Utc>>,
+    pub latest_keyword_batch: Option<PublishBatchSummary>,
+    pub latest_source_batch: Option<PublishBatchSummary>,
+    #[serde(default)]
+    pub keyword_counters: PublishCounters,
+    #[serde(default)]
+    pub source_counters: PublishCounters,
+    pub log_file: Option<AgentLogFileStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,5 +378,6 @@ pub struct AgentInterfacesView {
     pub report: Option<AgentNetworkReport>,
     pub config: AgentNetworkingConfig,
     pub nat: Option<NatStatusSnapshot>,
+    pub publish_observability: Option<KadPublishObservability>,
     pub last_error: Option<String>,
 }

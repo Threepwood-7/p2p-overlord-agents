@@ -54,3 +54,6 @@ external_ip_override = ""
 
 [log]
 level = "info"
+dir = "./runtime/logs"
+rotation = "daily"
+max_files = 7

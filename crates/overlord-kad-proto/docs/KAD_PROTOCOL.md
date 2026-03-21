@@ -333,10 +333,9 @@ Verified wire shape in this repo and eMule send path:
 
 Important caution:
 
-- the current Rust field name is `source_hash`
-- eMule uses the sender's client hash in this position, not the file hash again
-- `crates/overlord-kad-dht/src/publish.rs` currently fills this field from the file hash parameter
-- this is a `Verified difference`, not just naming drift
+- the current Rust field name is `publisher_id`
+- eMule uses the sender's Kad identity in this position, not the file hash again
+- the current Rust send path now matches that oracle behavior
 
 ### `KADEMLIA2_PUBLISH_NOTES_REQ` (`0x45`)
 
@@ -635,7 +634,7 @@ Verified source-type values used by eMule:
 Pending:
 
 - this repo has not yet done a full publish-source semantic audit for buddy, callback, or encryption tags
-- the Rust field name `source_hash` is semantically misleading and should be revisited later
+- the Rust field name `publisher_id` now matches the sender-identity semantics used by eMule
 
 ### Notes Publish
 

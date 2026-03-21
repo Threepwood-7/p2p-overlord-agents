@@ -484,7 +484,7 @@ impl DhtNode {
         keyword_hash: NodeId,
         file_hash: Ed2kHash,
         tags: Vec<Tag>,
-    ) -> Result<usize, DhtError> {
+    ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
         crate::publish::publish_keyword(
             &self.inner.rpc,
             &self.inner.routing_table,
@@ -500,9 +500,15 @@ impl DhtNode {
         &self,
         file_hash: Ed2kHash,
         tags: Vec<Tag>,
-    ) -> Result<usize, DhtError> {
-        crate::publish::publish_source(&self.inner.rpc, &self.inner.routing_table, file_hash, tags)
-            .await
+    ) -> Result<crate::publish::PublishAttemptStats, DhtError> {
+        crate::publish::publish_source(
+            &self.inner.rpc,
+            &self.inner.routing_table,
+            self.own_id(),
+            file_hash,
+            tags,
+        )
+        .await
     }
 
     /// Publish a note/rating for a file.

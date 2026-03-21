@@ -106,6 +106,31 @@ pub struct NatP2pConfig {
 #[serde(default)]
 pub struct LogConfig {
     pub level: String,
+    pub dir: Option<String>,
+    pub rotation: LogRotation,
+    pub max_files: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LogRotation {
+    Minutely,
+    Hourly,
+    #[default]
+    Daily,
+    Never,
+}
+
+impl LogRotation {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Minutely => "minutely",
+            Self::Hourly => "hourly",
+            Self::Daily => "daily",
+            Self::Never => "never",
+        }
+    }
 }
 
 impl Default for CoordinatorConfig {
@@ -196,6 +221,9 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             level: "info".to_string(),
+            dir: None,
+            rotation: LogRotation::Daily,
+            max_files: 7,
         }
     }
 }
@@ -212,6 +240,7 @@ impl EmuleAgentConfig {
         normalize_control_config(&mut config.control);
         normalize_p2p_config(&mut config.p2p);
         normalize_nat_config(&mut config.nat);
+        normalize_log_config(&mut config.log);
         Ok(config)
     }
 }
@@ -257,11 +286,25 @@ fn normalize_nat_config(config: &mut NatConfig) {
     }
 }
 
+fn normalize_log_config(config: &mut LogConfig) {
+    if config
+        .dir
+        .as_deref()
+        .is_some_and(|inner| inner.trim().is_empty())
+    {
+        config.dir = None;
+    }
+
+    if config.max_files == 0 {
+        config.max_files = LogConfig::default().max_files;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlConfig, NatConfig, NatP2pConfig, P2pConfig, normalize_control_config,
-        normalize_nat_config, normalize_p2p_config,
+        ControlConfig, LogConfig, LogRotation, NatConfig, NatP2pConfig, P2pConfig,
+        normalize_control_config, normalize_log_config, normalize_nat_config, normalize_p2p_config,
     };
     use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
 
@@ -322,5 +365,20 @@ mod tests {
 
         assert_eq!(config.bind_iface, None);
         assert_eq!(config.bind_ip, None);
+    }
+
+    #[test]
+    fn normalize_log_config_drops_blank_dir_and_zero_max_files() {
+        let mut config = LogConfig {
+            level: "debug".to_string(),
+            dir: Some(" ".to_string()),
+            rotation: LogRotation::Hourly,
+            max_files: 0,
+        };
+
+        normalize_log_config(&mut config);
+
+        assert_eq!(config.dir, None);
+        assert_eq!(config.max_files, LogConfig::default().max_files);
     }
 }

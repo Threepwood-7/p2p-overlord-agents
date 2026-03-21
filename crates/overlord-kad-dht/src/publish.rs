@@ -16,6 +16,22 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(STORE_TIMEOUT_SECS);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const PUBLISH_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Summarizes the outcome of a Kad publish fanout over the closest contacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PublishAttemptStats {
+    pub closest_contacts_considered: u32,
+    pub attempted_contacts: u32,
+    pub acked_contacts: u32,
+    pub timed_out_contacts: u32,
+}
+
+impl PublishAttemptStats {
+    #[must_use]
+    pub fn failed_contacts(self) -> u32 {
+        self.attempted_contacts.saturating_sub(self.acked_contacts)
+    }
+}
+
 /// Publish a keyword→file mapping.
 /// Returns the number of nodes that acknowledged.
 pub async fn publish_keyword(
@@ -24,7 +40,7 @@ pub async fn publish_keyword(
     keyword_hash: NodeId,
     file_hash: Ed2kHash,
     tags: Vec<Tag>,
-) -> Result<usize, DhtError> {
+) -> Result<PublishAttemptStats, DhtError> {
     let target = keyword_hash;
     let initial = get_initial(routing_table, &target).await;
 
@@ -56,7 +72,11 @@ pub async fn publish_keyword(
         entries: vec![entry],
     });
 
-    let mut acks = 0usize;
+    let mut stats = PublishAttemptStats {
+        closest_contacts_considered: traversal.closest.len() as u32,
+        attempted_contacts: traversal.closest.iter().take(K).count() as u32,
+        ..PublishAttemptStats::default()
+    };
     for contact in traversal.closest.iter().take(K) {
         match rpc
             .request(
@@ -67,21 +87,27 @@ pub async fn publish_keyword(
             )
             .await
         {
-            Ok(_) => acks += 1,
-            Err(e) => tracing::debug!("publish_keyword ack failed from {}: {}", contact.addr, e),
+            Ok(_) => stats.acked_contacts += 1,
+            Err(e) => {
+                if matches!(e, overlord_kad_net::NetError::Timeout { .. }) {
+                    stats.timed_out_contacts += 1;
+                }
+                tracing::debug!("publish_keyword ack failed from {}: {}", contact.addr, e);
+            }
         }
     }
 
-    Ok(acks)
+    Ok(stats)
 }
 
 /// Publish source availability for a file.
 pub async fn publish_source(
     rpc: &RpcManager,
     routing_table: &tokio::sync::Mutex<overlord_kad_routing::RoutingTable>,
+    publisher_id: NodeId,
     file_hash: Ed2kHash,
     tags: Vec<Tag>,
-) -> Result<usize, DhtError> {
+) -> Result<PublishAttemptStats, DhtError> {
     let target = NodeId::from_bytes(file_hash.0);
     let initial = get_initial(routing_table, &target).await;
 
@@ -106,11 +132,15 @@ pub async fn publish_source(
 
     let packet = KadPacket::PublishSourceReq(PublishSourceReq {
         target,
-        source_hash: file_hash,
+        publisher_id,
         tags,
     });
 
-    let mut acks = 0usize;
+    let mut stats = PublishAttemptStats {
+        closest_contacts_considered: traversal.closest.len() as u32,
+        attempted_contacts: traversal.closest.iter().take(K).count() as u32,
+        ..PublishAttemptStats::default()
+    };
     for contact in traversal.closest.iter().take(K) {
         match rpc
             .request(
@@ -121,12 +151,17 @@ pub async fn publish_source(
             )
             .await
         {
-            Ok(_) => acks += 1,
-            Err(e) => tracing::debug!("publish_source ack failed from {}: {}", contact.addr, e),
+            Ok(_) => stats.acked_contacts += 1,
+            Err(e) => {
+                if matches!(e, overlord_kad_net::NetError::Timeout { .. }) {
+                    stats.timed_out_contacts += 1;
+                }
+                tracing::debug!("publish_source ack failed from {}: {}", contact.addr, e);
+            }
         }
     }
 
-    Ok(acks)
+    Ok(stats)
 }
 
 /// Publish a note/rating for a file.

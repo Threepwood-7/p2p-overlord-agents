@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use md4::{Digest, Md4};
 use overlord_agent_nat::{
     AgentControlConfig, AgentEd2kConfig, AgentInterface, AgentKadConfig, AgentNatConfig,
@@ -34,12 +34,13 @@ use uuid::Uuid;
 
 use overlord_agent_common::{
     AgentInterfacesView, ConfigUpdate, ContentType, CoordinatorClient, FileRecord, HashType,
-    IndexerServer, IndexerService, IndexerStats, PopularHash, Protocol, RegisterRequest,
-    ResultBatch, RunningIndexerServer, SearchEvent, SearchEventStatus, SearchJob, SearchKind,
-    SnoopEntry, Source, TagEntry,
+    IndexerServer, IndexerService, IndexerStats, KadPublishObservability, PopularHash, Protocol,
+    PublishBatchSummary, PublishCounters, PublishSeedSource, RegisterRequest, ResultBatch,
+    RunningIndexerServer, SearchEvent, SearchEventStatus, SearchJob, SearchKind, SnoopEntry,
+    Source, TagEntry,
 };
 use overlord_kad_dht::{
-    DhtConfig, DhtNode, SearchResult, SourceResult,
+    DhtConfig, DhtNode, PublishAttemptStats, SearchResult, SourceResult,
     bootstrap::{BootstrapContact, encode_nodes_dat},
 };
 use overlord_kad_proto::{
@@ -49,6 +50,7 @@ use overlord_kad_proto::{
 use overlord_kad_routing::Contact;
 
 use crate::config::EmuleAgentConfig;
+use crate::logging::current_log_file_status;
 use crate::snoop_queue::SnoopQueue;
 
 const ACTIVE_BATCH_SIZE: usize = 25;
@@ -65,24 +67,9 @@ struct SyntheticPopularSeed {
     source_count: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PopularSeedingSource {
-    Coordinator,
-    SyntheticFallback,
-}
-
-impl PopularSeedingSource {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Coordinator => "coordinator",
-            Self::SyntheticFallback => "synthetic_fallback",
-        }
-    }
-}
-
 const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
     SyntheticPopularSeed {
-        title: "10 hours of nyan cat.mp4",
+        title: "ubuntu linux 24.04 desktop amd64.iso",
         size: 734_003_200,
         source_count: 31,
     },
@@ -92,7 +79,7 @@ const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
         source_count: 24,
     },
     SyntheticPopularSeed {
-        title: "dial-up symphony in c minor.mp3",
+        title: "10 hours of nyan cat.mp4",
         size: 92_381_184,
         source_count: 19,
     },
@@ -117,7 +104,7 @@ const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
         source_count: 14,
     },
     SyntheticPopularSeed {
-        title: "all your base orchestral finale.ogg",
+        title: "office 2010 professional plus x86.iso",
         size: 128_661_504,
         source_count: 22,
     },
@@ -137,7 +124,7 @@ const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
         source_count: 13,
     },
     SyntheticPopularSeed {
-        title: "legend of the crystal modem season 1.epub",
+        title: "ubuntu linux server 24.04 live amd64.iso",
         size: 18_456_321,
         source_count: 18,
     },
@@ -147,12 +134,12 @@ const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
         source_count: 12,
     },
     SyntheticPopularSeed {
-        title: "space pogo championship 2004.avi",
+        title: "adobe photoshop cs6 portable.rar",
         size: 943_128_576,
         source_count: 15,
     },
     SyntheticPopularSeed {
-        title: "quantum potato driver pack.exe",
+        title: "windows 7 ultimate sp1 x64 dvd.iso",
         size: 421_388_288,
         source_count: 9,
     },
@@ -162,12 +149,12 @@ const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
         source_count: 21,
     },
     SyntheticPopularSeed {
-        title: "the complete history of fake operating systems.mobi",
+        title: "game of thrones season 1 complete 720p.mkv",
         size: 44_992_610,
         source_count: 10,
     },
     SyntheticPopularSeed {
-        title: "banana modem firmware 2.0.bin",
+        title: "the office us season 2 dvdrip xvid.avi",
         size: 134_742_016,
         source_count: 8,
     },
@@ -177,7 +164,7 @@ const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
         source_count: 26,
     },
     SyntheticPopularSeed {
-        title: "ultra rare dancing clippy remix.mp3",
+        title: "top 100 dance hits 2009.mp3",
         size: 77_414_400,
         source_count: 23,
     },
@@ -187,77 +174,77 @@ const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
         source_count: 14,
     },
     SyntheticPopularSeed {
-        title: "pocket calculator speedrun any percent.mp4",
+        title: "ubuntu linux 22.04 desktop amd64.iso",
         size: 1_104_199_680,
         source_count: 28,
     },
     SyntheticPopularSeed {
-        title: "wallpaper pack 5000 neon frogs.7z",
+        title: "the lord of the rings extended trilogy 1080p.mkv",
         size: 612_892_672,
         source_count: 20,
     },
     SyntheticPopularSeed {
-        title: "secret bonus disk of windows 3.11.iso",
+        title: "microsoft office 2007 enterprise.iso",
         size: 695_205_888,
         source_count: 17,
     },
     SyntheticPopularSeed {
-        title: "24 hours of elevator jungle.mix.flac",
+        title: "grand theft auto vice city full rip.iso",
         size: 1_544_269_824,
         source_count: 12,
     },
     SyntheticPopularSeed {
-        title: "dot matrix printer concerto no 5.mp3",
+        title: "breaking bad season 3 complete 720p.mkv",
         size: 88_199_168,
         source_count: 25,
     },
     SyntheticPopularSeed {
-        title: "home planet karaoke deluxe.iso",
+        title: "ubuntu linux 20.04.6 live server amd64.iso",
         size: 3_964_108_800,
         source_count: 16,
     },
     SyntheticPopularSeed {
-        title: "samurai pizza modem chronicles.cbz",
+        title: "top gear complete specials collection x264.mp4",
         size: 233_308_160,
         source_count: 13,
     },
     SyntheticPopularSeed {
-        title: "the unbelievable toaster patch notes.txt",
+        title: "the beatles abbey road remastered.flac",
         size: 1_572_864,
         source_count: 7,
     },
     SyntheticPopularSeed {
-        title: "moonbase solitaire hd installer.msi",
+        title: "harry potter complete 1080p bluray x264.mkv",
         size: 376_877_056,
         source_count: 11,
     },
     SyntheticPopularSeed {
-        title: "penguin disco server diagnostics.log.zip",
+        title: "visual studio 2010 professional.iso",
         size: 190_513_152,
         source_count: 9,
     },
     SyntheticPopularSeed {
-        title: "cybernetic accordion lessons vol 4.mp4",
+        title: "ubuntu linux 18.04 desktop amd64.iso",
         size: 1_672_331_264,
         source_count: 18,
     },
     SyntheticPopularSeed {
-        title: "fuzzy robot bedtime stories.aac",
+        title: "pink floyd the wall remastered.flac",
         size: 49_283_072,
         source_count: 15,
     },
     SyntheticPopularSeed {
-        title: "ocean of blinking cursors documentary.mkv",
+        title: "friends complete season 5 dvdrip xvid.avi",
         size: 2_965_983_232,
         source_count: 19,
     },
     SyntheticPopularSeed {
-        title: "desktop goose world tour 2001.avi",
+        title: "ubuntu linux handbook 2026.pdf",
         size: 821_051_392,
         source_count: 24,
     },
     SyntheticPopularSeed {
-        title: "supercut of fake progress bars.webm",
+        title: "windows xp professional sp3 corporate.iso",
         size: 1_281_286_144,
         source_count: 17,
     },
@@ -282,6 +269,82 @@ const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
         source_count: 22,
     },
 ];
+
+fn build_publish_batch_summary(
+    seed_source: PublishSeedSource,
+    published_items: usize,
+    stats: PublishAttemptStats,
+    completed_at: DateTime<Utc>,
+) -> PublishBatchSummary {
+    PublishBatchSummary {
+        seed_source,
+        published_items: published_items as u32,
+        closest_contacts_considered: stats.closest_contacts_considered,
+        attempted_contacts: stats.attempted_contacts,
+        acked_contacts: stats.acked_contacts,
+        failed_contacts: stats.failed_contacts(),
+        timed_out_contacts: stats.timed_out_contacts,
+        completed_at,
+        last_success_at: (stats.acked_contacts > 0).then_some(completed_at),
+    }
+}
+
+fn apply_publish_summary(counters: &mut PublishCounters, summary: &PublishBatchSummary) {
+    counters.batches += 1;
+    counters.published_items += u64::from(summary.published_items);
+    counters.closest_contacts_considered += u64::from(summary.closest_contacts_considered);
+    counters.attempted_contacts += u64::from(summary.attempted_contacts);
+    counters.acked_contacts += u64::from(summary.acked_contacts);
+    counters.failed_contacts += u64::from(summary.failed_contacts);
+    counters.timed_out_contacts += u64::from(summary.timed_out_contacts);
+    counters.last_batch_at = Some(summary.completed_at);
+    if summary.last_success_at.is_some() {
+        counters.last_success_at = summary.last_success_at;
+    }
+}
+
+fn log_publish_summary(family: &str, summary: &PublishBatchSummary) {
+    let other_failures = summary
+        .failed_contacts
+        .saturating_sub(summary.timed_out_contacts);
+    info!(
+        "kad publish family={} seed_source={} items={} closest={} attempted={} acked={} failed={} timed_out={} other_failures={}",
+        family,
+        summary.seed_source.label(),
+        summary.published_items,
+        summary.closest_contacts_considered,
+        summary.attempted_contacts,
+        summary.acked_contacts,
+        summary.failed_contacts,
+        summary.timed_out_contacts,
+        other_failures
+    );
+}
+
+async fn record_publish_summaries(
+    publish_observability: &Arc<Mutex<KadPublishObservability>>,
+    seed_source: PublishSeedSource,
+    published_items: usize,
+    keyword_stats: PublishAttemptStats,
+    source_stats: PublishAttemptStats,
+    completed_at: DateTime<Utc>,
+) {
+    let keyword_summary =
+        build_publish_batch_summary(seed_source, published_items, keyword_stats, completed_at);
+    let source_summary =
+        build_publish_batch_summary(seed_source, published_items, source_stats, completed_at);
+
+    log_publish_summary("keyword", &keyword_summary);
+    log_publish_summary("source", &source_summary);
+
+    let mut observability = publish_observability.lock().await;
+    observability.last_seed_source = Some(seed_source);
+    observability.last_seed_at = Some(completed_at);
+    observability.latest_keyword_batch = Some(keyword_summary.clone());
+    observability.latest_source_batch = Some(source_summary.clone());
+    apply_publish_summary(&mut observability.keyword_counters, &keyword_summary);
+    apply_publish_summary(&mut observability.source_counters, &source_summary);
+}
 
 #[derive(Clone)]
 struct AgentStatePaths {
@@ -317,6 +380,7 @@ pub struct OverlordAgentEmule {
     started_at: Instant,
     state_paths: AgentStatePaths,
     snoop_queue: Arc<Mutex<SnoopQueue>>,
+    publish_observability: Arc<Mutex<KadPublishObservability>>,
     runtime: Arc<Mutex<Option<AgentNetworkRuntime>>>,
     control_server: Arc<Mutex<Option<ControlServerRuntime>>>,
     control_selection_state: Arc<RwLock<ResolvedInterfaceBindingReport>>,
@@ -356,6 +420,7 @@ impl OverlordAgentEmule {
             started_at: Instant::now(),
             state_paths,
             snoop_queue: Arc::new(Mutex::new(SnoopQueue::new(snoop_queue_config))),
+            publish_observability: Arc::new(Mutex::new(KadPublishObservability::default())),
             runtime: Arc::new(Mutex::new(None)),
             control_server: Arc::new(Mutex::new(None)),
             control_selection_state: Arc::new(RwLock::new(control_selection_state)),
@@ -1098,14 +1163,14 @@ fn synthetic_popular_hash(index: usize, seed: &SyntheticPopularSeed) -> PopularH
 /// built-in synthetic seed set.
 fn select_popular_hashes_for_seeding(
     hashes: Vec<PopularHash>,
-) -> (PopularSeedingSource, Vec<PopularHash>) {
+) -> (PublishSeedSource, Vec<PopularHash>) {
     if hashes.is_empty() {
         (
-            PopularSeedingSource::SyntheticFallback,
+            PublishSeedSource::SyntheticFallback,
             synthetic_popular_hashes(),
         )
     } else {
-        (PopularSeedingSource::Coordinator, hashes)
+        (PublishSeedSource::Coordinator, hashes)
     }
 }
 
@@ -1113,7 +1178,7 @@ fn select_popular_hashes_for_seeding(
 /// when the coordinator returned no popular hashes.
 async fn fetch_popular_hashes_for_seeding(
     coordinator: &CoordinatorClient,
-) -> Result<(PopularSeedingSource, Vec<PopularHash>)> {
+) -> Result<(PublishSeedSource, Vec<PopularHash>)> {
     Ok(select_popular_hashes_for_seeding(
         coordinator.popular_hashes().await?,
     ))
@@ -1122,23 +1187,25 @@ async fn fetch_popular_hashes_for_seeding(
 /// Publishes one seeding batch and logs which source produced it.
 async fn seed_popular_from_source(
     dht: &DhtNode,
-    source: PopularSeedingSource,
+    source: PublishSeedSource,
     hashes: Vec<PopularHash>,
+    publish_observability: &Arc<Mutex<KadPublishObservability>>,
 ) -> Result<()> {
     info!(
         "kad seeding source={} entries={}",
         source.label(),
         hashes.len()
     );
-    seed_popular_impl(dht, hashes).await
+    seed_popular_impl(dht, source, hashes, publish_observability).await
 }
 
 async fn seed_popular_from_coordinator_or_fallback(
     dht: &DhtNode,
     coordinator: &CoordinatorClient,
+    publish_observability: &Arc<Mutex<KadPublishObservability>>,
 ) -> Result<()> {
     let (source, hashes) = fetch_popular_hashes_for_seeding(coordinator).await?;
-    seed_popular_from_source(dht, source, hashes).await
+    seed_popular_from_source(dht, source, hashes, publish_observability).await
 }
 
 /// Returns the eMule high-ID source type used for source publishes in the non-firewalled case.
@@ -1150,12 +1217,20 @@ fn emule_high_id_source_type(file_size: u64) -> u8 {
     }
 }
 
-async fn seed_popular_impl(dht: &DhtNode, hashes: Vec<PopularHash>) -> Result<()> {
+async fn seed_popular_impl(
+    dht: &DhtNode,
+    seed_source: PublishSeedSource,
+    hashes: Vec<PopularHash>,
+    publish_observability: &Arc<Mutex<KadPublishObservability>>,
+) -> Result<()> {
     if !dht.is_bootstrapped() {
         anyhow::bail!("kad node is not bootstrapped yet");
     }
 
     let bind_addr = dht.bind_addr()?;
+    let mut keyword_totals = PublishAttemptStats::default();
+    let mut source_totals = PublishAttemptStats::default();
+    let published_items = hashes.len();
     for hash in hashes {
         let HashType::Ed2k(raw_hash) = hash.hash;
         let file_hash = Ed2kHash::from_str(&raw_hash)
@@ -1169,9 +1244,23 @@ async fn seed_popular_impl(dht: &DhtNode, hashes: Vec<PopularHash>) -> Result<()
             Tag::filesize(hash.size),
             Tag::sources(hash.source_count),
         ];
-        let _ = dht
+        match dht
             .publish_keyword(keyword_hash, file_hash, keyword_tags)
-            .await;
+            .await
+        {
+            Ok(stats) => {
+                keyword_totals.closest_contacts_considered += stats.closest_contacts_considered;
+                keyword_totals.attempted_contacts += stats.attempted_contacts;
+                keyword_totals.acked_contacts += stats.acked_contacts;
+                keyword_totals.timed_out_contacts += stats.timed_out_contacts;
+            }
+            Err(error) => {
+                debug!(
+                    "keyword publish failed for target={} hash={}: {error}",
+                    keyword_hash, raw_hash
+                );
+            }
+        }
         let source_tags = vec![
             Tag::new_short(tag_name::SOURCEPORT, TagValue::U16(bind_addr.port())),
             Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(bind_addr.port())),
@@ -1181,8 +1270,28 @@ async fn seed_popular_impl(dht: &DhtNode, hashes: Vec<PopularHash>) -> Result<()
             ),
             Tag::filesize(hash.size),
         ];
-        let _ = dht.publish_source(file_hash, source_tags).await;
+        match dht.publish_source(file_hash, source_tags).await {
+            Ok(stats) => {
+                source_totals.closest_contacts_considered += stats.closest_contacts_considered;
+                source_totals.attempted_contacts += stats.attempted_contacts;
+                source_totals.acked_contacts += stats.acked_contacts;
+                source_totals.timed_out_contacts += stats.timed_out_contacts;
+            }
+            Err(error) => {
+                debug!("source publish failed for hash={}: {error}", raw_hash);
+            }
+        }
     }
+
+    record_publish_summaries(
+        publish_observability,
+        seed_source,
+        published_items,
+        keyword_totals,
+        source_totals,
+        Utc::now(),
+    )
+    .await;
 
     Ok(())
 }
@@ -1929,7 +2038,10 @@ impl IndexerService for OverlordAgentEmule {
                 .unwrap_or(0.0)
                 / uptime_secs as f32
         };
+        let config = self.config.read().await.clone();
         let interface_report = self.interface_report().await;
+        let mut publish_observability = self.publish_observability.lock().await.clone();
+        publish_observability.log_file = Some(current_log_file_status(&config));
 
         Ok(IndexerStats {
             indexer_id: self.indexer_id,
@@ -1947,6 +2059,7 @@ impl IndexerService for OverlordAgentEmule {
                 None => None,
             },
             interface_report: Some(interface_report),
+            publish_observability: Some(publish_observability),
         })
     }
 
@@ -1970,7 +2083,13 @@ impl IndexerService for OverlordAgentEmule {
         let Some(runtime) = runtime else {
             anyhow::bail!("agent networking is waiting for interface selection");
         };
-        seed_popular_impl(&runtime.dht, hashes).await
+        seed_popular_impl(
+            &runtime.dht,
+            PublishSeedSource::ManualApi,
+            hashes,
+            &self.publish_observability,
+        )
+        .await
     }
 
     async fn flush_snoop(&self) -> Result<Vec<SnoopEntry>> {
@@ -1992,6 +2111,7 @@ impl OverlordAgentEmule {
         let shutdown = Arc::clone(&runtime.shutdown);
         let state_paths = self.state_paths.clone();
         let coordinator = self.coordinator.clone();
+        let publish_observability = Arc::clone(&self.publish_observability);
         runtime.tasks.lock().await.push(tokio::spawn(async move {
             while !shutdown.load(Ordering::Relaxed) && !dht.is_bootstrapped() {
                 match dht.bootstrap().await {
@@ -1999,8 +2119,12 @@ impl OverlordAgentEmule {
                         if let Err(error) = persist_nodes_dat_for(&dht, &state_paths).await {
                             warn!("failed to persist nodes.dat after bootstrap: {error}");
                         }
-                        if let Err(error) =
-                            seed_popular_from_coordinator_or_fallback(&dht, &coordinator).await
+                        if let Err(error) = seed_popular_from_coordinator_or_fallback(
+                            &dht,
+                            &coordinator,
+                            &publish_observability,
+                        )
+                        .await
                         {
                             debug!("post-bootstrap seeding failed: {error}");
                         }
@@ -2103,14 +2227,19 @@ impl OverlordAgentEmule {
         let dht = runtime.dht.clone();
         let shutdown = Arc::clone(&runtime.shutdown);
         let republish_secs = config.p2p.kad.republish_interval_secs;
+        let publish_observability = Arc::clone(&self.publish_observability);
         runtime.tasks.lock().await.push(tokio::spawn(async move {
             while !shutdown.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_secs(republish_secs)).await;
                 if shutdown.load(Ordering::Relaxed) || !dht.is_bootstrapped() {
                     continue;
                 }
-                if let Err(error) =
-                    seed_popular_from_coordinator_or_fallback(&dht, &coordinator).await
+                if let Err(error) = seed_popular_from_coordinator_or_fallback(
+                    &dht,
+                    &coordinator,
+                    &publish_observability,
+                )
+                .await
                 {
                     debug!("republish cycle failed: {error}");
                 }
@@ -2122,11 +2251,11 @@ impl OverlordAgentEmule {
 #[cfg(test)]
 mod tests {
     use super::{
-        EMULE_LARGE_FILE_SIZE_THRESHOLD, EmuleAgentConfig, PopularSeedingSource,
-        SYNTHETIC_POPULAR_SEEDS, apply_networking_config, empty_networking_config,
-        emule_high_id_source_type, flush_snoop_queue, keyword_target, restore_snoop_queue,
-        select_popular_hashes_for_seeding, significant_keyword_words, synthetic_file_hash,
-        synthetic_popular_hashes,
+        EMULE_LARGE_FILE_SIZE_THRESHOLD, EmuleAgentConfig, SYNTHETIC_POPULAR_SEEDS,
+        apply_networking_config, apply_publish_summary, build_publish_batch_summary,
+        empty_networking_config, emule_high_id_source_type, flush_snoop_queue, keyword_target,
+        restore_snoop_queue, select_popular_hashes_for_seeding, significant_keyword_words,
+        synthetic_file_hash, synthetic_popular_hashes,
     };
     use crate::{config::SnoopQueueConfig, snoop_queue::SnoopQueue};
     use axum::{
@@ -2135,8 +2264,11 @@ mod tests {
         routing::{get, post},
     };
     use chrono::{TimeZone, Utc};
-    use overlord_agent_common::{CoordinatorClient, HashType, PopularHash, SnoopEntry};
+    use overlord_agent_common::{
+        CoordinatorClient, HashType, PopularHash, PublishCounters, PublishSeedSource, SnoopEntry,
+    };
     use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
+    use overlord_kad_dht::PublishAttemptStats;
     use std::{collections::HashSet, net::SocketAddr, sync::Arc};
     use tokio::sync::Mutex;
     use uuid::Uuid;
@@ -2271,7 +2403,7 @@ mod tests {
 
         let (source, selected) = select_popular_hashes_for_seeding(coordinator_hashes.clone());
 
-        assert_eq!(source, PopularSeedingSource::Coordinator);
+        assert_eq!(source, PublishSeedSource::Coordinator);
         assert_eq!(selected, coordinator_hashes);
     }
 
@@ -2279,7 +2411,7 @@ mod tests {
     fn seeding_falls_back_to_synthetic_hashes_when_empty() {
         let (source, selected) = select_popular_hashes_for_seeding(Vec::new());
 
-        assert_eq!(source, PopularSeedingSource::SyntheticFallback);
+        assert_eq!(source, PublishSeedSource::SyntheticFallback);
         assert_eq!(selected.len(), SYNTHETIC_POPULAR_SEEDS.len());
     }
 
@@ -2290,6 +2422,53 @@ mod tests {
             emule_high_id_source_type(EMULE_LARGE_FILE_SIZE_THRESHOLD + 1),
             4
         );
+    }
+
+    #[test]
+    fn build_publish_batch_summary_marks_success_timestamp_when_acked() {
+        let completed_at = Utc.with_ymd_and_hms(2026, 3, 21, 11, 0, 0).unwrap();
+        let summary = build_publish_batch_summary(
+            PublishSeedSource::Coordinator,
+            40,
+            PublishAttemptStats {
+                closest_contacts_considered: 10,
+                attempted_contacts: 10,
+                acked_contacts: 6,
+                timed_out_contacts: 3,
+            },
+            completed_at,
+        );
+
+        assert_eq!(summary.failed_contacts, 4);
+        assert_eq!(summary.last_success_at, Some(completed_at));
+    }
+
+    #[test]
+    fn apply_publish_summary_accumulates_counters() {
+        let completed_at = Utc.with_ymd_and_hms(2026, 3, 21, 11, 5, 0).unwrap();
+        let summary = build_publish_batch_summary(
+            PublishSeedSource::SyntheticFallback,
+            40,
+            PublishAttemptStats {
+                closest_contacts_considered: 8,
+                attempted_contacts: 8,
+                acked_contacts: 5,
+                timed_out_contacts: 2,
+            },
+            completed_at,
+        );
+        let mut counters = PublishCounters::default();
+
+        apply_publish_summary(&mut counters, &summary);
+
+        assert_eq!(counters.batches, 1);
+        assert_eq!(counters.published_items, 40);
+        assert_eq!(counters.attempted_contacts, 8);
+        assert_eq!(counters.acked_contacts, 5);
+        assert_eq!(counters.failed_contacts, 3);
+        assert_eq!(counters.timed_out_contacts, 2);
+        assert_eq!(counters.last_batch_at, Some(completed_at));
+        assert_eq!(counters.last_success_at, Some(completed_at));
     }
 
     #[tokio::test]

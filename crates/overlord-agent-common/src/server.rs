@@ -308,6 +308,7 @@ mod tests {
                 uptime_secs: 0,
                 nat: None,
                 interface_report: None,
+                publish_observability: None,
             })
         }
 

@@ -14,8 +14,9 @@ pub use overlord_agent_nat::{
 pub use server::{IndexerServer, RunningIndexerServer};
 pub use service::IndexerService;
 pub use types::{
-    AgentInterfacesView, ConfigUpdate, ContentType, FileRecord, HashType, IndexerRegistration,
-    IndexerStats, PopularHash, Protocol, RegisterRequest, RegistrationResponse, ResultBatch,
-    SearchCancelRequest, SearchEvent, SearchEventStatus, SearchJob, SearchKind, SnoopEntry, Source,
-    TagEntry,
+    AgentInterfacesView, AgentLogFileStatus, ConfigUpdate, ContentType, FileRecord, HashType,
+    IndexerRegistration, IndexerStats, KadPublishObservability, PopularHash, Protocol,
+    PublishBatchSummary, PublishCounters, PublishSeedSource, RegisterRequest, RegistrationResponse,
+    ResultBatch, SearchCancelRequest, SearchEvent, SearchEventStatus, SearchJob, SearchKind,
+    SnoopEntry, Source, TagEntry,
 };
