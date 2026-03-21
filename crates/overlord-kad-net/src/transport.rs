@@ -1,7 +1,7 @@
 use crate::error::NetError;
 use async_trait::async_trait;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -14,6 +14,24 @@ pub trait Transport: Send + Sync + 'static {
     async fn recv_raw(&self) -> Result<(Vec<u8>, SocketAddr), NetError>;
     /// Local address.
     fn local_addr(&self) -> std::io::Result<SocketAddr>;
+}
+
+#[async_trait]
+impl<T> Transport for Arc<T>
+where
+    T: Transport + ?Sized,
+{
+    async fn send_raw(&self, addr: SocketAddr, data: &[u8]) -> Result<(), NetError> {
+        self.as_ref().send_raw(addr, data).await
+    }
+
+    async fn recv_raw(&self) -> Result<(Vec<u8>, SocketAddr), NetError> {
+        self.as_ref().recv_raw().await
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.as_ref().local_addr()
+    }
 }
 
 // ── UdpTransport ──────────────────────────────────────────────────────────────

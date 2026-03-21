@@ -43,8 +43,8 @@ use overlord_kad_dht::{
     bootstrap::{BootstrapContact, encode_nodes_dat},
 };
 use overlord_kad_proto::{
-    Ed2kHash, KadPacket, NodeId, Tag, TagName, TagValue, constants::K, packet::ContactEntry,
-    tag_name,
+    Ed2kHash, KadPacket, NodeId, SearchKeyReq, SearchNotesReq, SearchSourceReq, Tag, TagName,
+    TagValue, constants::K, packet::ContactEntry, tag_name,
 };
 use overlord_kad_routing::Contact;
 
@@ -1090,20 +1090,70 @@ fn map_search_result_for(dht: &DhtNode, result: &SearchResult) -> Result<FileRec
     })
 }
 
-async fn record_snoop_entry(
-    snoop_queue: &Arc<Mutex<SnoopQueue>>,
-    query: String,
-    hash: Option<HashType>,
-) {
-    let mut queue = snoop_queue.lock().await;
-    queue.record(query, hash, Utc::now());
+fn build_keyword_snoop_entry(req: &SearchKeyReq, now: chrono::DateTime<Utc>) -> SnoopEntry {
+    let payload_hex = if req.restrictive_payload.is_empty() {
+        None
+    } else {
+        Some(hex::encode(&req.restrictive_payload))
+    };
+    let logical_key = format!(
+        "keyword:{}:{:04x}:{}",
+        req.target,
+        req.start_position,
+        payload_hex.as_deref().unwrap_or_default()
+    );
+    SnoopEntry::Keyword {
+        logical_key,
+        target: req.target.to_string(),
+        start_position: req.start_position,
+        restrictive_payload_hex: payload_hex,
+        hit_count: 1,
+        first_seen: now,
+        last_seen: now,
+        last_drained_at: None,
+    }
 }
 
-async fn next_passive_keyword_target(snoop_queue: &Arc<Mutex<SnoopQueue>>) -> Option<NodeId> {
+fn build_source_snoop_entry(req: &SearchSourceReq, now: chrono::DateTime<Utc>) -> SnoopEntry {
+    SnoopEntry::Source {
+        logical_key: format!(
+            "source:{}:{:04x}:{}",
+            req.target, req.start_position, req.size
+        ),
+        target: req.target.to_string(),
+        start_position: req.start_position,
+        size: req.size,
+        hit_count: 1,
+        first_seen: now,
+        last_seen: now,
+        last_drained_at: None,
+    }
+}
+
+fn build_notes_snoop_entry(req: &SearchNotesReq, now: chrono::DateTime<Utc>) -> SnoopEntry {
+    SnoopEntry::Notes {
+        logical_key: format!("notes:{}:{}", req.target, req.size),
+        target: req.target.to_string(),
+        size: req.size,
+        hit_count: 1,
+        first_seen: now,
+        last_seen: now,
+        last_drained_at: None,
+    }
+}
+
+async fn record_snoop_entry(snoop_queue: &Arc<Mutex<SnoopQueue>>, entry: SnoopEntry) {
+    let mut queue = snoop_queue.lock().await;
+    queue.record(entry);
+}
+
+async fn next_passive_keyword_request(
+    snoop_queue: &Arc<Mutex<SnoopQueue>>,
+) -> Option<SearchKeyReq> {
     snoop_queue
         .lock()
         .await
-        .select_next_keyword_target(Utc::now())
+        .select_next_keyword_request(Utc::now())
 }
 
 async fn persist_nodes_dat_for(dht: &DhtNode, state_paths: &AgentStatePaths) -> Result<()> {
@@ -1220,23 +1270,13 @@ async fn handle_unsolicited_packet(
             .await?;
         }
         KadPacket::SearchKeyReq(req) => {
-            record_snoop_entry(snoop_queue, format!("keyword:{}", req.target), None).await
+            record_snoop_entry(snoop_queue, build_keyword_snoop_entry(&req, Utc::now())).await
         }
         KadPacket::SearchSourceReq(req) => {
-            record_snoop_entry(
-                snoop_queue,
-                format!("source:{}", req.target),
-                Some(HashType::Ed2k(hex::encode(req.target.0))),
-            )
-            .await
+            record_snoop_entry(snoop_queue, build_source_snoop_entry(&req, Utc::now())).await
         }
         KadPacket::SearchNotesReq(req) => {
-            record_snoop_entry(
-                snoop_queue,
-                format!("notes:{}", req.target),
-                Some(HashType::Ed2k(hex::encode(req.target.0))),
-            )
-            .await
+            record_snoop_entry(snoop_queue, build_notes_snoop_entry(&req, Utc::now())).await
         }
         KadPacket::PublishKeyReq(req) => {
             let _ = dht
@@ -1679,10 +1719,10 @@ impl OverlordAgentEmule {
                 if shutdown.load(Ordering::Relaxed) || !dht.is_bootstrapped() {
                     continue;
                 }
-                let Some(target) = next_passive_keyword_target(&snoop_queue).await else {
+                let Some(request) = next_passive_keyword_request(&snoop_queue).await else {
                     continue;
                 };
-                let mut stream = dht.search_keywords(target);
+                let mut stream = dht.search_keyword_request(request);
                 let mut files = Vec::new();
                 while let Some(result) = stream.next().await {
                     if let Ok(file) = map_search_result_for(&dht, &result) {
@@ -1872,9 +1912,11 @@ mod tests {
 
     #[tokio::test]
     async fn restore_and_flush_preserve_last_drained_at() {
-        let restored_entry = SnoopEntry {
-            query: "keyword:00112233445566778899aabbccddeeff".to_string(),
-            hash: None,
+        let restored_entry = SnoopEntry::Keyword {
+            logical_key: "keyword:00112233445566778899aabbccddeeff:8000:aabb".to_string(),
+            target: "00112233445566778899aabbccddeeff".to_string(),
+            start_position: 0x8000,
+            restrictive_payload_hex: Some("aabb".to_string()),
             hit_count: 4,
             first_seen: Utc.with_ymd_and_hms(2026, 3, 21, 10, 0, 0).unwrap(),
             last_seen: Utc.with_ymd_and_hms(2026, 3, 21, 10, 5, 0).unwrap(),

@@ -35,12 +35,12 @@ pub struct TraversalCandidate {
     pub distance: NodeId, // XOR distance to target
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TraversalKind {
     /// Pure node lookup — just find close nodes.
     FindNode,
     /// Keyword search — after traversal, send SearchKeyReq to close nodes.
-    Keyword { start_position: u16 },
+    Keyword { request: SearchKeyReq },
     /// Source search — after traversal, send SearchSourceReq to close nodes.
     Source { size: u64 },
     /// Notes search — after traversal, send SearchNotesReq to close nodes.
@@ -359,20 +359,7 @@ async fn run_search_phase(
 
     for contact in send_to {
         let packet = match kind {
-            TraversalKind::Keyword { start_position } => {
-                // Repo policy: stay on the parity-safe eMule/aMule path of
-                // `target + start_position` with `start_position = 0` for now.
-                // The original code uses `0x8000 + expression blob` when
-                // serialized search-term data exists, and both eMule/aMule
-                // still carry TODOs around true numeric start-position paging.
-                // References:
-                // - srchybrid/kademlia/kademlia/Search.cpp CSearch::StorePacket
-                // - src/kademlia/kademlia/Search.cpp CSearch::StorePacket
-                KadPacket::SearchKeyReq(SearchKeyReq {
-                    target,
-                    start_position,
-                })
-            }
+            TraversalKind::Keyword { ref request } => KadPacket::SearchKeyReq(request.clone()),
             TraversalKind::Source { size } => KadPacket::SearchSourceReq(SearchSourceReq {
                 target,
                 start_position: 0,
@@ -544,14 +531,21 @@ mod tests {
     use super::*;
     use overlord_kad_net::MockTransport;
     use overlord_kad_net::{ObfuscationLayer, RpcConfig};
-    use overlord_kad_proto::NodeId;
+    use overlord_kad_proto::{KadPacket, NodeId};
     use overlord_kad_proto::{Ed2kHash, packet::SearchRes};
+    use std::sync::Arc;
 
     #[test]
     fn test_traversal_kind_clone() {
         let k = TraversalKind::FindNode;
         let _ = k;
-        let k2 = TraversalKind::Keyword { start_position: 5 };
+        let k2 = TraversalKind::Keyword {
+            request: SearchKeyReq {
+                target: NodeId::from_bytes([0x11; 16]),
+                start_position: 5,
+                restrictive_payload: Vec::new(),
+            },
+        };
         let _ = k2;
     }
 
@@ -692,10 +686,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_search_phase_collects_multiple_search_res_packets() {
-        let transport = MockTransport::new("127.0.0.1:0".parse().unwrap());
+        let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
         let injector = transport.injector();
         let rpc = RpcManager::new(
-            transport,
+            Arc::clone(&transport),
             ObfuscationLayer::new(0, false),
             RpcConfig::default(),
         );
@@ -743,7 +737,13 @@ mod tests {
             &rpc,
             SearchPhaseConfig {
                 responded: &[contact],
-                kind: TraversalKind::Keyword { start_position: 0 },
+                kind: TraversalKind::Keyword {
+                    request: SearchKeyReq {
+                        target,
+                        start_position: 0,
+                        restrictive_payload: Vec::new(),
+                    },
+                },
                 target,
                 query_timeout: Duration::from_millis(100),
                 deadline: Instant::now() + Duration::from_millis(300),
@@ -759,5 +759,104 @@ mod tests {
         let streamed_second = result_rx.recv().await.expect("second streamed result");
         assert_eq!(streamed_first.0, Ed2kHash::from_bytes([1; 16]));
         assert_eq!(streamed_second.0, Ed2kHash::from_bytes([2; 16]));
+    }
+
+    #[tokio::test]
+    async fn test_run_search_phase_replays_plain_keyword_request_shape() {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+        let rpc = RpcManager::new(
+            Arc::clone(&transport),
+            ObfuscationLayer::new(0, false),
+            RpcConfig::default(),
+        );
+        let _handle = rpc.start();
+
+        let target = NodeId::from_bytes([0x44; 16]);
+        let contact = TraversalContact {
+            id: NodeId::from_bytes([0x12; 16]),
+            addr: "192.168.1.20:4672".parse().unwrap(),
+            version: 9,
+        };
+
+        let _ = run_search_phase(
+            &rpc,
+            SearchPhaseConfig {
+                responded: &[contact.clone()],
+                kind: TraversalKind::Keyword {
+                    request: SearchKeyReq {
+                        target,
+                        start_position: 0,
+                        restrictive_payload: Vec::new(),
+                    },
+                },
+                target,
+                query_timeout: Duration::from_millis(20),
+                deadline: Instant::now() + Duration::from_millis(50),
+                phase2_fanout: 1,
+                cancel: &CancellationToken::new(),
+                result_tx: None,
+            },
+        )
+        .await;
+
+        let outgoing = transport.drain_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].0, contact.addr);
+        let packet = KadPacket::decode(&outgoing[0].1).unwrap();
+        let KadPacket::SearchKeyReq(request) = packet else {
+            panic!("expected SearchKeyReq");
+        };
+        assert_eq!(request.target, target);
+        assert_eq!(request.start_position, 0);
+        assert!(request.restrictive_payload.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_search_phase_replays_restrictive_keyword_payload() {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+        let rpc = RpcManager::new(
+            Arc::clone(&transport),
+            ObfuscationLayer::new(0, false),
+            RpcConfig::default(),
+        );
+        let _handle = rpc.start();
+
+        let target = NodeId::from_bytes([0x55; 16]);
+        let contact = TraversalContact {
+            id: NodeId::from_bytes([0x13; 16]),
+            addr: "192.168.1.21:4672".parse().unwrap(),
+            version: 9,
+        };
+        let restrictive_request = SearchKeyReq {
+            target,
+            start_position: 0x8000,
+            restrictive_payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        };
+
+        let _ = run_search_phase(
+            &rpc,
+            SearchPhaseConfig {
+                responded: &[contact.clone()],
+                kind: TraversalKind::Keyword {
+                    request: restrictive_request.clone(),
+                },
+                target,
+                query_timeout: Duration::from_millis(20),
+                deadline: Instant::now() + Duration::from_millis(50),
+                phase2_fanout: 1,
+                cancel: &CancellationToken::new(),
+                result_tx: None,
+            },
+        )
+        .await;
+
+        let outgoing = transport.drain_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].0, contact.addr);
+        let packet = KadPacket::decode(&outgoing[0].1).unwrap();
+        let KadPacket::SearchKeyReq(request) = packet else {
+            panic!("expected SearchKeyReq");
+        };
+        assert_eq!(request, restrictive_request);
     }
 }

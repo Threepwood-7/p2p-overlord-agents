@@ -3,7 +3,7 @@ use crate::error::DhtError;
 use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use overlord_kad_net::{ObfuscationLayer, RpcConfig, RpcManager, UdpTransport};
-use overlord_kad_proto::{Ed2kHash, KadPacket, NodeId, Tag, constants::K, opcode};
+use overlord_kad_proto::{Ed2kHash, KadPacket, NodeId, SearchKeyReq, Tag, constants::K, opcode};
 use overlord_kad_routing::{Contact, RoutingTable};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -348,6 +348,30 @@ impl DhtNode {
         target: NodeId,
         cancel: CancellationToken,
     ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+        self.search_keyword_request_with_cancel(
+            SearchKeyReq {
+                target,
+                start_position: 0,
+                restrictive_payload: Vec::new(),
+            },
+            cancel,
+        )
+    }
+
+    /// Replay a full Kad keyword request shape harvested from the network.
+    pub fn search_keyword_request(
+        &self,
+        request: SearchKeyReq,
+    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+        self.search_keyword_request_with_cancel(request, CancellationToken::new())
+    }
+
+    pub fn search_keyword_request_with_cancel(
+        &self,
+        request: SearchKeyReq,
+        cancel: CancellationToken,
+    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+        let target = request.target;
         let initial = {
             match self.inner.routing_table.try_lock() {
                 Ok(rt) => rt
@@ -362,10 +386,10 @@ impl DhtNode {
                 Err(_) => vec![],
             }
         };
-        crate::search::search_keywords(
+        crate::search::search_keywords_by_request(
             self.inner.rpc.clone(),
             initial,
-            target,
+            request,
             self.inner.config.keyword_result_cap,
             self.inner.config.search_phase2_fanout,
             cancel,

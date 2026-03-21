@@ -1,5 +1,5 @@
 use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt, binrw};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 
 use crate::constants::{OP_KADEMLIAHEADER, OP_KADEMLIAPACKEDPROT, opcode};
 use crate::error::ProtoError;
@@ -133,11 +133,17 @@ pub struct Res {
 
 // ── SearchKeyReq ─────────────────────────────────────────────────────────────
 
-#[derive(BinRead, BinWrite, Debug, Clone, PartialEq)]
-#[brw(little)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchKeyReq {
     pub target: NodeId,
     pub start_position: u16,
+    /// Raw trailing bytes preserved for restrictive keyword searches.
+    ///
+    /// eMule/aMule append the serialized search expression tree here when the
+    /// high bit of `start_position` is set. We keep the payload opaque so the
+    /// runtime can harvest and replay the exact wire shape without attempting
+    /// to parse it yet.
+    pub restrictive_payload: Vec<u8>,
 }
 
 // ── SearchSourceReq ──────────────────────────────────────────────────────────
@@ -401,7 +407,7 @@ impl KadPacket {
                 KadPacket::Res(p)
             }
             opcode::SEARCH_KEY_REQ => {
-                let p = cursor.read_le::<SearchKeyReq>()?;
+                let p = read_search_key_req(&mut cursor)?;
                 KadPacket::SearchKeyReq(p)
             }
             opcode::SEARCH_SOURCE_REQ => {
@@ -474,7 +480,7 @@ impl KadPacket {
             KadPacket::HelloRes(p) => buf.write_le(p)?,
             KadPacket::Req(p) => buf.write_le(p)?,
             KadPacket::Res(p) => buf.write_le(p)?,
-            KadPacket::SearchKeyReq(p) => buf.write_le(p)?,
+            KadPacket::SearchKeyReq(p) => write_search_key_req(&mut buf, p)?,
             KadPacket::SearchSourceReq(p) => buf.write_le(p)?,
             KadPacket::SearchNotesReq(p) => buf.write_le(p)?,
             KadPacket::SearchRes(p) => buf.write_le(p)?,
@@ -561,6 +567,28 @@ fn read_search_res(cursor: &mut Cursor<&[u8]>) -> Result<SearchRes, ProtoError> 
         keyword_id,
         results,
     })
+}
+
+fn read_search_key_req(cursor: &mut Cursor<&[u8]>) -> Result<SearchKeyReq, ProtoError> {
+    let target = cursor.read_le::<NodeId>()?;
+    let start_position = cursor.read_le::<u16>()?;
+    let mut restrictive_payload = Vec::new();
+    cursor
+        .read_to_end(&mut restrictive_payload)
+        .map_err(ProtoError::Io)?;
+    Ok(SearchKeyReq {
+        target,
+        start_position,
+        restrictive_payload,
+    })
+}
+
+fn write_search_key_req(buf: &mut Cursor<Vec<u8>>, packet: &SearchKeyReq) -> Result<(), ProtoError> {
+    buf.write_le(&packet.target)?;
+    buf.write_le(&packet.start_position)?;
+    buf.write_all(&packet.restrictive_payload)
+        .map_err(ProtoError::Io)?;
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -836,6 +864,40 @@ mod tests {
         if let KadPacket::SearchSourceReq(req) = pkt2 {
             assert_eq!(req.start_position, 0);
             assert_eq!(req.size, 99_999_999);
+        } else {
+            panic!("wrong type");
+        }
+    }
+
+    #[test]
+    fn test_search_key_req_roundtrip_plain() {
+        let pkt = KadPacket::SearchKeyReq(SearchKeyReq {
+            target: NodeId::from_bytes([0x22; 16]),
+            start_position: 0,
+            restrictive_payload: Vec::new(),
+        });
+        let pkt2 = roundtrip(&pkt);
+        if let KadPacket::SearchKeyReq(req) = pkt2 {
+            assert_eq!(req.target, NodeId::from_bytes([0x22; 16]));
+            assert_eq!(req.start_position, 0);
+            assert!(req.restrictive_payload.is_empty());
+        } else {
+            panic!("wrong type");
+        }
+    }
+
+    #[test]
+    fn test_search_key_req_roundtrip_restrictive_payload() {
+        let pkt = KadPacket::SearchKeyReq(SearchKeyReq {
+            target: NodeId::from_bytes([0x33; 16]),
+            start_position: 0x8000,
+            restrictive_payload: vec![0x01, 0x02, 0xA5, 0xFF],
+        });
+        let pkt2 = roundtrip(&pkt);
+        if let KadPacket::SearchKeyReq(req) = pkt2 {
+            assert_eq!(req.target, NodeId::from_bytes([0x33; 16]));
+            assert_eq!(req.start_position, 0x8000);
+            assert_eq!(req.restrictive_payload, vec![0x01, 0x02, 0xA5, 0xFF]);
         } else {
             panic!("wrong type");
         }

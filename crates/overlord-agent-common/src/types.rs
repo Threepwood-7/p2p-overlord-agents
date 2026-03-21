@@ -129,13 +129,142 @@ pub struct ConfigUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SnoopEntry {
-    pub query: String,
-    pub hash: Option<HashType>,
-    pub hit_count: u32,
-    pub first_seen: DateTime<Utc>,
-    pub last_seen: DateTime<Utc>,
-    pub last_drained_at: Option<DateTime<Utc>>,
+#[serde(tag = "family", rename_all = "snake_case")]
+pub enum SnoopEntry {
+    Keyword {
+        logical_key: String,
+        target: String,
+        start_position: u16,
+        restrictive_payload_hex: Option<String>,
+        hit_count: u32,
+        first_seen: DateTime<Utc>,
+        last_seen: DateTime<Utc>,
+        last_drained_at: Option<DateTime<Utc>>,
+    },
+    Source {
+        logical_key: String,
+        target: String,
+        start_position: u16,
+        size: u64,
+        hit_count: u32,
+        first_seen: DateTime<Utc>,
+        last_seen: DateTime<Utc>,
+        last_drained_at: Option<DateTime<Utc>>,
+    },
+    Notes {
+        logical_key: String,
+        target: String,
+        size: u64,
+        hit_count: u32,
+        first_seen: DateTime<Utc>,
+        last_seen: DateTime<Utc>,
+        last_drained_at: Option<DateTime<Utc>>,
+    },
+}
+
+impl SnoopEntry {
+    #[must_use]
+    pub fn logical_key(&self) -> &str {
+        match self {
+            SnoopEntry::Keyword { logical_key, .. }
+            | SnoopEntry::Source { logical_key, .. }
+            | SnoopEntry::Notes { logical_key, .. } => logical_key,
+        }
+    }
+
+    #[must_use]
+    pub fn target(&self) -> &str {
+        match self {
+            SnoopEntry::Keyword { target, .. }
+            | SnoopEntry::Source { target, .. }
+            | SnoopEntry::Notes { target, .. } => target,
+        }
+    }
+
+    #[must_use]
+    pub fn hit_count(&self) -> u32 {
+        match self {
+            SnoopEntry::Keyword { hit_count, .. }
+            | SnoopEntry::Source { hit_count, .. }
+            | SnoopEntry::Notes { hit_count, .. } => *hit_count,
+        }
+    }
+
+    pub fn set_hit_count(&mut self, value: u32) {
+        match self {
+            SnoopEntry::Keyword { hit_count, .. }
+            | SnoopEntry::Source { hit_count, .. }
+            | SnoopEntry::Notes { hit_count, .. } => *hit_count = value,
+        }
+    }
+
+    #[must_use]
+    pub fn first_seen(&self) -> DateTime<Utc> {
+        match self {
+            SnoopEntry::Keyword { first_seen, .. }
+            | SnoopEntry::Source { first_seen, .. }
+            | SnoopEntry::Notes { first_seen, .. } => first_seen.clone(),
+        }
+    }
+
+    pub fn set_first_seen(&mut self, value: DateTime<Utc>) {
+        match self {
+            SnoopEntry::Keyword { first_seen, .. }
+            | SnoopEntry::Source { first_seen, .. }
+            | SnoopEntry::Notes { first_seen, .. } => *first_seen = value,
+        }
+    }
+
+    #[must_use]
+    pub fn last_seen(&self) -> DateTime<Utc> {
+        match self {
+            SnoopEntry::Keyword { last_seen, .. }
+            | SnoopEntry::Source { last_seen, .. }
+            | SnoopEntry::Notes { last_seen, .. } => last_seen.clone(),
+        }
+    }
+
+    pub fn set_last_seen(&mut self, value: DateTime<Utc>) {
+        match self {
+            SnoopEntry::Keyword { last_seen, .. }
+            | SnoopEntry::Source { last_seen, .. }
+            | SnoopEntry::Notes { last_seen, .. } => *last_seen = value,
+        }
+    }
+
+    #[must_use]
+    pub fn last_drained_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            SnoopEntry::Keyword { last_drained_at, .. }
+            | SnoopEntry::Source { last_drained_at, .. }
+            | SnoopEntry::Notes { last_drained_at, .. } => last_drained_at.clone(),
+        }
+    }
+
+    pub fn set_last_drained_at(&mut self, value: Option<DateTime<Utc>>) {
+        match self {
+            SnoopEntry::Keyword {
+                last_drained_at, ..
+            }
+            | SnoopEntry::Source {
+                last_drained_at, ..
+            }
+            | SnoopEntry::Notes {
+                last_drained_at, ..
+            } => *last_drained_at = value,
+        }
+    }
+
+    #[must_use]
+    pub fn restrictive_payload_hex(&self) -> Option<&str> {
+        match self {
+            SnoopEntry::Keyword {
+                restrictive_payload_hex,
+                ..
+            } => restrictive_payload_hex.as_deref(),
+            SnoopEntry::Source { .. } | SnoopEntry::Notes { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

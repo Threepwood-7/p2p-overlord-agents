@@ -2,7 +2,7 @@ use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_tra
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use overlord_kad_net::RpcManager;
 use overlord_kad_proto::constants::SEARCH_TIMEOUT_SECS;
-use overlord_kad_proto::{Ed2kHash, NodeId};
+use overlord_kad_proto::{Ed2kHash, NodeId, SearchKeyReq};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -22,12 +22,35 @@ pub fn search_keywords(
     phase2_fanout: usize,
     cancel: CancellationToken,
 ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+    search_keywords_by_request(
+        rpc,
+        initial,
+        SearchKeyReq {
+            target,
+            start_position: 0,
+            restrictive_payload: Vec::new(),
+        },
+        result_cap,
+        phase2_fanout,
+        cancel,
+    )
+}
+
+/// Run a keyword search using a prebuilt Kad keyword request shape.
+pub fn search_keywords_by_request(
+    rpc: RpcManager,
+    initial: Vec<TraversalContact>,
+    request: SearchKeyReq,
+    result_cap: usize,
+    phase2_fanout: usize,
+    cancel: CancellationToken,
+) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SearchResult>(256);
     tokio::spawn(async move {
         let (raw_tx, mut raw_rx) = mpsc::channel::<(Ed2kHash, Vec<overlord_kad_proto::Tag>)>(256);
         let config = TraversalConfig {
-            target,
-            search_kind: TraversalKind::Keyword { start_position: 0 },
+            target: request.target,
+            search_kind: TraversalKind::Keyword { request },
             timeout: SEARCH_TIMEOUT,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
