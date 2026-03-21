@@ -2,18 +2,24 @@
 url = "http://127.0.0.1:13300"
 
 [agent]
-bind_addr = "0.0.0.0:13301"
-control_selected_interface_name = ""
-control_selection_confirmed = false
-control_bind_ip = ""
 indexer_id_path = "./runtime/overlord-agent-emule.indexer-id"
 state_dir = "./runtime"
 hostname = "localhost"
 version = "0.1.0"
 
-[kad]
-udp_bind_addr = "0.0.0.0:41000"
-ed2k_bind_addr = "0.0.0.0:41001"
+[control]
+bind_iface = ""
+bind_ip = ""
+selection_confirmed = false
+listen_port = 13301
+
+[p2p]
+bind_iface = ""
+bind_ip = ""
+selection_confirmed = false
+
+[p2p.kad]
+listen_port = 41000
 nodes_dat_path = "./runtime/overlord-kad.nodes.dat"
 bootstrap_nodes = []
 search_timeout_secs = 45
@@ -27,10 +33,12 @@ notes_result_cap = 1000
 obfuscation_enabled = true
 enable_mock_results = false
 
-[nat]
+[p2p.ed2k]
+listen_port = 41001
+
+[nat.p2p]
 enabled = false
 backend_order = ["upnp"]
-bind_ip = ""
 igd_ip = ""
 discovery_timeout_secs = 5
 lease_duration_secs = 3600
