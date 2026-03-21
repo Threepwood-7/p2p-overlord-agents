@@ -69,7 +69,9 @@ fn decode_legacy_search_result_string(bytes: &[u8]) -> String {
         return WINDOWS_1252.decode(bytes).0.into_owned();
     }
 
-    let mut wide = vec![0u16; wide_len as usize];
+    let wide_len_i32 = wide_len;
+    let wide_len = usize::try_from(wide_len_i32).expect("wide_len is positive");
+    let mut wide = vec![0u16; wide_len];
     let converted = unsafe {
         MultiByteToWideChar(
             CP_ACP,
@@ -77,14 +79,15 @@ fn decode_legacy_search_result_string(bytes: &[u8]) -> String {
             bytes.as_ptr(),
             src_len,
             wide.as_mut_ptr(),
-            wide_len,
+            wide_len_i32,
         )
     };
     if converted <= 0 {
         return WINDOWS_1252.decode(bytes).0.into_owned();
     }
 
-    String::from_utf16_lossy(&wide[..converted as usize])
+    let converted = usize::try_from(converted).expect("converted length is positive");
+    String::from_utf16_lossy(&wide[..converted])
 }
 
 #[cfg(not(windows))]
@@ -93,6 +96,7 @@ fn decode_legacy_search_result_string(bytes: &[u8]) -> String {
 }
 
 impl Tag {
+    #[must_use]
     pub fn new_short(name_byte: u8, value: TagValue) -> Self {
         Tag {
             name: TagName::Short(name_byte),
@@ -100,6 +104,7 @@ impl Tag {
         }
     }
 
+    #[must_use]
     pub fn new_long(name: impl Into<String>, value: TagValue) -> Self {
         Tag {
             name: TagName::Long(name.into()),
@@ -107,24 +112,28 @@ impl Tag {
         }
     }
 
+    #[must_use]
     pub fn filename(name: impl Into<String>) -> Self {
         Tag::new_short(tag_name::FILENAME, TagValue::String(name.into()))
     }
 
+    #[must_use]
     pub fn filesize(size: u64) -> Self {
         Tag::new_short(tag_name::FILESIZE, TagValue::U64(size))
     }
 
+    #[must_use]
     pub fn filetype(t: impl Into<String>) -> Self {
         Tag::new_short(tag_name::FILETYPE, TagValue::String(t.into()))
     }
 
+    #[must_use]
     pub fn sources(n: u32) -> Self {
         Tag::new_short(tag_name::SOURCES, TagValue::U32(n))
     }
 }
 
-/// Map TagValue to its raw type byte (without the 0x80 name flag).
+/// Map `TagValue` to its raw type byte (without the `0x80` name flag).
 fn value_type_byte(v: &TagValue) -> u8 {
     match v {
         TagValue::Hash(_) => 0x01,
@@ -277,7 +286,7 @@ impl BinWrite for Tag {
             }
             TagName::Long(s) => {
                 let bytes = s.as_bytes();
-                let len = bytes.len() as u16;
+                let len = u16::try_from(bytes.len()).expect("tag name length exceeds u16");
                 writer.write_type(&len, endian)?;
                 writer.write_all(bytes).map_err(binrw::Error::Io)?;
             }
@@ -289,7 +298,7 @@ impl BinWrite for Tag {
             }
             TagValue::String(s) => {
                 let bytes = s.as_bytes();
-                let len = bytes.len() as u16;
+                let len = u16::try_from(bytes.len()).expect("string tag length exceeds u16");
                 writer.write_type(&len, endian)?;
                 writer.write_all(bytes).map_err(binrw::Error::Io)?;
             }
@@ -300,11 +309,11 @@ impl BinWrite for Tag {
                 writer.write_type(v, endian)?;
             }
             TagValue::Bool(v) => {
-                let b: u8 = if *v { 1 } else { 0 };
+                let b = u8::from(*v);
                 writer.write_type(&b, endian)?;
             }
             TagValue::Blob(data) => {
-                let len = data.len() as u32;
+                let len = u32::try_from(data.len()).expect("blob tag length exceeds u32");
                 writer.write_type(&len, endian)?;
                 writer.write_all(data).map_err(binrw::Error::Io)?;
             }
@@ -345,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_short_name_u64() {
-        let t = Tag::filesize(1234567890);
+        let t = Tag::filesize(1_234_567_890);
         let t2 = roundtrip(&t);
         assert_eq!(t, t2);
     }

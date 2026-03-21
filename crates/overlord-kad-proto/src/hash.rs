@@ -13,6 +13,7 @@ pub struct Ed2kHash(pub [u8; 16]);
 impl Ed2kHash {
     pub const ZERO: Ed2kHash = Ed2kHash([0u8; 16]);
 
+    #[must_use]
     pub fn from_bytes(b: [u8; 16]) -> Self {
         Ed2kHash(b)
     }
@@ -21,7 +22,7 @@ impl Ed2kHash {
 impl fmt::Display for Ed2kHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for b in &self.0 {
-            write!(f, "{:02x}", b)?;
+            write!(f, "{b:02x}")?;
         }
         Ok(())
     }
@@ -63,10 +64,12 @@ pub struct KadUdpKey(pub u32);
 impl KadUdpKey {
     pub const ZERO: KadUdpKey = KadUdpKey(0);
 
+    #[must_use]
     pub fn new(key: u32) -> Self {
         KadUdpKey(key)
     }
 
+    #[must_use]
     pub fn value(&self) -> u32 {
         self.0
     }
@@ -89,14 +92,14 @@ mod tests {
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
             0x0f, 0x10,
         ]);
-        assert_eq!(format!("{}", h), "0102030405060708090a0b0c0d0e0f10");
+        assert_eq!(format!("{h}"), "0102030405060708090a0b0c0d0e0f10");
     }
 
     #[test]
     fn test_ed2k_from_str_roundtrip() {
         let hex = "aabbccddeeff00112233445566778899";
         let h: Ed2kHash = hex.parse().unwrap();
-        assert_eq!(format!("{}", h), hex);
+        assert_eq!(format!("{h}"), hex);
     }
 
     #[test]
@@ -118,13 +121,13 @@ mod tests {
 
     #[test]
     fn test_kad_udp_key() {
-        let k = KadUdpKey::new(0xDEADBEEF);
-        assert_eq!(k.value(), 0xDEADBEEF);
+        let k = KadUdpKey::new(0xDEAD_BEEF);
+        assert_eq!(k.value(), 0xDEAD_BEEF);
     }
 
     #[test]
     fn test_kad_udp_key_binrw_roundtrip() {
-        let k = KadUdpKey::new(0x12345678);
+        let k = KadUdpKey::new(0x1234_5678);
         let mut buf = Cursor::new(Vec::new());
         k.write_le(&mut buf).unwrap();
         buf.set_position(0);

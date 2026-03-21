@@ -13,11 +13,13 @@ pub struct NodeId(pub [u8; 16]);
 impl NodeId {
     pub const ZERO: NodeId = NodeId([0u8; 16]);
 
+    #[must_use]
     pub fn from_bytes(b: [u8; 16]) -> Self {
         NodeId(b)
     }
 
     /// XOR distance between two node IDs.
+    #[must_use]
     pub fn distance(&self, other: &Self) -> NodeId {
         let mut result = [0u8; 16];
         for (index, slot) in result.iter_mut().enumerate() {
@@ -28,20 +30,20 @@ impl NodeId {
 
     /// Index of the highest set bit in the XOR distance (0 = MSB of byte 0).
     /// Returns None if XOR is all zeros (same node).
+    #[must_use]
     pub fn distance_exp(&self, other: &Self) -> Option<u32> {
         let xor = self.distance(other);
-        for byte_idx in 0..16usize {
-            let b = xor.0[byte_idx];
+        for (byte_idx, b) in (0_u32..).zip(xor.0) {
             if b != 0 {
                 // highest set bit in this byte
-                let bit_in_byte = 7 - b.leading_zeros();
-                return Some((byte_idx as u32) * 8 + (7 - bit_in_byte));
+                return Some(byte_idx * 8 + (7 - b.ilog2()));
             }
         }
         None
     }
 
     /// Returns the bit at position `pos` (0 = MSB of byte 0).
+    #[must_use]
     pub fn bit(&self, pos: u32) -> bool {
         let byte_idx = (pos / 8) as usize;
         let bit_idx = 7 - (pos % 8); // MSB = bit 7
@@ -55,7 +57,7 @@ impl NodeId {
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for b in &self.0 {
-            write!(f, "{:02x}", b)?;
+            write!(f, "{b:02x}")?;
         }
         Ok(())
     }
@@ -170,14 +172,14 @@ mod tests {
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
             0x0f, 0x10,
         ]);
-        assert_eq!(format!("{}", a), "0102030405060708090a0b0c0d0e0f10");
+        assert_eq!(format!("{a}"), "0102030405060708090a0b0c0d0e0f10");
     }
 
     #[test]
     fn test_from_str_roundtrip() {
         let hex = "0102030405060708090a0b0c0d0e0f10";
         let id: NodeId = hex.parse().unwrap();
-        assert_eq!(format!("{}", id), hex);
+        assert_eq!(format!("{id}"), hex);
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub struct ContactEntry {
 }
 
 impl ContactEntry {
+    #[must_use]
     pub fn ip_addr(&self) -> std::net::Ipv4Addr {
         std::net::Ipv4Addr::from(self.ip.to_be_bytes())
     }
@@ -34,12 +35,13 @@ pub struct BootstrapReq;
 
 // ── BootstrapRes ─────────────────────────────────────────────────────────────
 
-/// Real on-wire format (from eMule source CKademliaUDPListener::ProcessBootstrapRequest):
-///   sender_id  (NodeId, 16 bytes)
-///   tcp_port   (u16, 2 bytes)
-///   version    (u8,  1 byte)
-///   count      (u16, 2 bytes)
-///   contacts   (count × 25 bytes each)
+/// Real on-wire format (from eMule source
+/// `CKademliaUDPListener::ProcessBootstrapRequest`):
+///   `sender_id` (`NodeId`, 16 bytes)
+///   `tcp_port` (`u16`, 2 bytes)
+///   `version` (`u8`, 1 byte)
+///   `count` (`u16`, 2 bytes)
+///   `contacts` (`count × 25` bytes each)
 #[binrw]
 #[brw(little)]
 #[derive(Debug, Clone, PartialEq)]
@@ -48,7 +50,7 @@ pub struct BootstrapRes {
     pub sender_tcp_port: u16,
     pub sender_version: u8,
     #[br(temp)]
-    #[bw(calc = contacts.len() as u16)]
+    #[bw(calc = u16::try_from(contacts.len()).expect("contact count exceeds u16"))]
     count: u16,
     #[br(count = count)]
     pub contacts: Vec<ContactEntry>,
@@ -67,7 +69,7 @@ pub struct HelloReq {
     #[br(if(version >= 6))]
     pub udp_key: Option<u32>,
     #[br(temp)]
-    #[bw(calc = tags.len() as u8)]
+    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
     #[br(count = tag_count)]
     pub tags: Vec<Tag>,
@@ -86,7 +88,7 @@ pub struct HelloRes {
     #[br(if(version >= 6))]
     pub udp_key: Option<u32>,
     #[br(temp)]
-    #[bw(calc = tags.len() as u8)]
+    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
     #[br(count = tag_count)]
     pub tags: Vec<Tag>,
@@ -108,10 +110,10 @@ pub struct HelloResAck;
 #[derive(BinRead, BinWrite, Debug, Clone, PartialEq)]
 #[brw(little)]
 pub struct Req {
-    /// How many closest contacts to return (KADEMLIA_FIND_VALUE/FIND_NODE/STORE).
+    /// How many closest contacts to return (`KADEMLIA_FIND_VALUE/FIND_NODE/STORE`).
     pub count: u8,
     pub target: NodeId,
-    /// The NodeId we believe the recipient has. Recipient drops packet if mismatch.
+    /// The `NodeId` we believe the recipient has. Recipient drops packet if mismatch.
     pub recipient_id: NodeId,
 }
 
@@ -123,7 +125,7 @@ pub struct Req {
 pub struct Res {
     pub target: NodeId,
     #[br(temp)]
-    #[bw(calc = contacts.len() as u8)]
+    #[bw(calc = u8::try_from(contacts.len()).expect("contact count exceeds u8"))]
     count: u8,
     #[br(count = count)]
     pub contacts: Vec<ContactEntry>,
@@ -168,7 +170,7 @@ pub struct SearchNotesReq {
 pub struct SearchResultEntry {
     pub hash: Ed2kHash,
     #[br(temp)]
-    #[bw(calc = tags.len() as u8)]
+    #[bw(calc = u8::try_from(tags.len()).expect("tag count exceeds u8"))]
     tag_count: u8,
     #[br(count = tag_count)]
     pub tags: Vec<Tag>,
@@ -191,7 +193,7 @@ pub struct SearchRes {
     /// The keyword hash that was queried (echo of SearchKeyReq.target).
     pub keyword_id: NodeId,
     #[br(temp)]
-    #[bw(calc = results.len() as u16)]
+    #[bw(calc = u16::try_from(results.len()).expect("result count exceeds u16"))]
     count: u16,
     #[br(count = count)]
     pub results: Vec<SearchResultEntry>,
@@ -205,7 +207,7 @@ pub struct SearchRes {
 pub struct PublishEntry {
     pub hash: Ed2kHash,
     #[br(temp)]
-    #[bw(calc = tags.len() as u16)]
+    #[bw(calc = u16::try_from(tags.len()).expect("tag count exceeds u16"))]
     tag_count: u16,
     #[br(count = tag_count)]
     pub tags: Vec<Tag>,
@@ -219,7 +221,7 @@ pub struct PublishEntry {
 pub struct PublishKeyReq {
     pub target: NodeId,
     #[br(temp)]
-    #[bw(calc = entries.len() as u16)]
+    #[bw(calc = u16::try_from(entries.len()).expect("entry count exceeds u16"))]
     count: u16,
     #[br(count = count)]
     pub entries: Vec<PublishEntry>,
@@ -234,7 +236,7 @@ pub struct PublishSourceReq {
     pub target: NodeId,
     pub source_hash: Ed2kHash,
     #[br(temp)]
-    #[bw(calc = tags.len() as u16)]
+    #[bw(calc = u16::try_from(tags.len()).expect("tag count exceeds u16"))]
     tag_count: u16,
     #[br(count = tag_count)]
     pub tags: Vec<Tag>,
@@ -249,7 +251,7 @@ pub struct PublishNotesReq {
     pub target: NodeId,
     pub note_hash: Ed2kHash,
     #[br(temp)]
-    #[bw(calc = tags.len() as u16)]
+    #[bw(calc = u16::try_from(tags.len()).expect("tag count exceeds u16"))]
     tag_count: u16,
     #[br(count = tag_count)]
     pub tags: Vec<Tag>,
@@ -346,6 +348,11 @@ pub enum KadPacket {
 impl KadPacket {
     /// Decode a Kad2 packet from a raw buffer.
     /// Handles both plain (0xE4) and zlib-compressed (0xE5) packets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError`] when the buffer is too short, the protocol header
+    /// is invalid, decompression fails, or the packet body cannot be decoded.
     pub fn decode(buf: &[u8]) -> Result<KadPacket, ProtoError> {
         if buf.len() < 2 {
             return Err(ProtoError::BufferTooShort);
@@ -450,7 +457,11 @@ impl KadPacket {
         Ok(packet)
     }
 
-    /// Encode a KadPacket to a byte vector.
+    /// Encode a `KadPacket` to a byte vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError`] when writing the packet body fails.
     pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
         let mut buf = Cursor::new(Vec::new());
         buf.write_le(&OP_KADEMLIAHEADER)?;
@@ -458,11 +469,9 @@ impl KadPacket {
         buf.write_le(&op)?;
 
         match self {
-            KadPacket::BootstrapReq => {}
             KadPacket::BootstrapRes(p) => buf.write_le(p)?,
             KadPacket::HelloReq(p) => buf.write_le(p)?,
             KadPacket::HelloRes(p) => buf.write_le(p)?,
-            KadPacket::HelloResAck => {}
             KadPacket::Req(p) => buf.write_le(p)?,
             KadPacket::Res(p) => buf.write_le(p)?,
             KadPacket::SearchKeyReq(p) => buf.write_le(p)?,
@@ -473,13 +482,15 @@ impl KadPacket {
             KadPacket::PublishSourceReq(p) => buf.write_le(p)?,
             KadPacket::PublishNotesReq(p) => buf.write_le(p)?,
             KadPacket::PublishRes(p) => buf.write_le(p)?,
-            KadPacket::PublishResAck => {}
             KadPacket::FirewalledReq(p) => buf.write_le(p)?,
             KadPacket::FirewalledRes(p) => buf.write_le(p)?,
-            KadPacket::FirewalledAckRes => {}
             KadPacket::FirewallUdp(p) => buf.write_le(p)?,
-            KadPacket::Ping => {}
-            KadPacket::Pong => {}
+            KadPacket::BootstrapReq
+            | KadPacket::HelloResAck
+            | KadPacket::PublishResAck
+            | KadPacket::FirewalledAckRes
+            | KadPacket::Ping
+            | KadPacket::Pong => {}
             KadPacket::Unknown { payload, .. } => {
                 buf.write_all(payload).map_err(ProtoError::Io)?;
             }
@@ -489,6 +500,7 @@ impl KadPacket {
     }
 
     /// Returns the opcode byte for this packet.
+    #[must_use]
     pub fn opcode(&self) -> u8 {
         match self {
             KadPacket::BootstrapReq => opcode::BOOTSTRAP_REQ,
@@ -584,14 +596,14 @@ mod tests {
         let contacts = vec![
             ContactEntry {
                 node_id: NodeId::from_bytes([1u8; 16]),
-                ip: 0x01020304,
+                ip: 0x0102_0304,
                 udp_port: 4672,
                 tcp_port: 4662,
                 version: 9,
             },
             ContactEntry {
                 node_id: NodeId::from_bytes([2u8; 16]),
-                ip: 0x05060708,
+                ip: 0x0506_0708,
                 udp_port: 4673,
                 tcp_port: 4663,
                 version: 8,
@@ -641,17 +653,17 @@ mod tests {
     fn test_hello_req_v9_with_tags_roundtrip() {
         let pkt = KadPacket::HelloReq(HelloReq {
             node_id: NodeId::from_bytes([0xAA; 16]),
-            tcp_ip: 0xC0A80101,
+            tcp_ip: 0xC0A8_0101,
             tcp_port: 4662,
             version: 9,
-            udp_key: Some(0xDEADBEEF),
+            udp_key: Some(0xDEAD_BEEF),
             tags: vec![Tag::filename("test.txt"), Tag::filesize(12345)],
         });
         let bytes = pkt.encode().unwrap();
         let pkt2 = KadPacket::decode(&bytes).unwrap();
         if let KadPacket::HelloReq(req) = pkt2 {
             assert_eq!(req.version, 9);
-            assert_eq!(req.udp_key, Some(0xDEADBEEF));
+            assert_eq!(req.udp_key, Some(0xDEAD_BEEF));
             assert_eq!(req.tags.len(), 2);
         } else {
             panic!("wrong packet type");
@@ -662,7 +674,7 @@ mod tests {
     fn test_hello_req_v4_no_udp_key() {
         let pkt = KadPacket::HelloReq(HelloReq {
             node_id: NodeId::from_bytes([0xBB; 16]),
-            tcp_ip: 0xC0A80102,
+            tcp_ip: 0xC0A8_0102,
             tcp_port: 4662,
             version: 4,
             udp_key: None,
@@ -850,7 +862,7 @@ mod tests {
         // to_be_bytes() of 0xC0A80101 = [0xC0, 0xA8, 0x01, 0x01]
         let c = ContactEntry {
             node_id: NodeId::ZERO,
-            ip: 0xC0A80101_u32,
+            ip: 0xC0A8_0101_u32,
             udp_port: 4672,
             tcp_port: 4662,
             version: 9,
