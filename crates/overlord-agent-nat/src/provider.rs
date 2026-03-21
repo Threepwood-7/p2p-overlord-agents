@@ -20,6 +20,8 @@ use crate::{
     types::{MappedEndpoint, MappingSpec, NatStatus},
 };
 
+const INTERNET_GATEWAY_DEVICE_1: URN = URN::device("schemas-upnp-org", "InternetGatewayDevice", 1);
+const INTERNET_GATEWAY_DEVICE_2: URN = URN::device("schemas-upnp-org", "InternetGatewayDevice", 2);
 const WAN_IP_CONNECTION_1: URN = URN::service("schemas-upnp-org", "WANIPConnection", 1);
 const WAN_IP_CONNECTION_2: URN = URN::service("schemas-upnp-org", "WANIPConnection", 2);
 const WAN_PPP_CONNECTION_1: URN = URN::service("schemas-upnp-org", "WANPPPConnection", 1);
@@ -266,7 +268,12 @@ async fn discover_gateway(config: &NatConfig) -> Result<GatewayHandle> {
         discovered
     };
 
+    let mut fallback_gateway_ips = Vec::new();
     for device in devices {
+        if let Some(host) = device.url().host() {
+            append_unique_ipv4_candidate(&mut fallback_gateway_ips, host);
+        }
+
         if let Some(requested_igd_ip) = config.igd_ip.as_deref() {
             let matches = device
                 .url()
@@ -287,6 +294,15 @@ async fn discover_gateway(config: &NatConfig) -> Result<GatewayHandle> {
             if let Some(service) = service {
                 return Ok(GatewayHandle { device, service });
             }
+        }
+    }
+
+    if let Some(bind_ip) = bind_ip {
+        fallback_gateway_ips.extend(gateway_ips_for_bind_ip(bind_ip));
+    }
+    for gateway_ip in dedupe_ipv4_candidates(fallback_gateway_ips) {
+        if let Some(gateway) = discover_gateway_from_configured_ip(&gateway_ip.to_string()).await? {
+            return Ok(gateway);
         }
     }
 
@@ -363,18 +379,20 @@ async fn discover_root_devices_via_bind_ip(
     socket
         .set_nonblocking(true)
         .context("failed to switch SSDP socket to nonblocking mode")?;
-    let socket = UdpSocket::from_std(socket.into())
-        .context("failed to convert SSDP socket for tokio")?;
+    let socket =
+        UdpSocket::from_std(socket.into()).context("failed to convert SSDP socket for tokio")?;
 
-    let search = format!(
-        "M-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nMan:\"ssdp:discover\"\r\nST: {}\r\nMX: 2\r\n\r\n",
-        SearchTarget::RootDevice
-    );
     let multicast_addr: SocketAddr = "239.255.255.250:1900".parse().unwrap();
-    socket
-        .send_to(search.as_bytes(), multicast_addr)
-        .await
-        .context("failed to send SSDP discovery packet")?;
+    for target in ssdp_search_targets() {
+        let search = format!(
+            "M-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nMan:\"ssdp:discover\"\r\nST: {}\r\nMX: 2\r\n\r\n",
+            target
+        );
+        socket
+            .send_to(search.as_bytes(), multicast_addr)
+            .await
+            .with_context(|| format!("failed to send SSDP discovery packet for {target}"))?;
+    }
 
     let started = tokio::time::Instant::now();
     let mut locations = HashSet::new();
@@ -402,6 +420,61 @@ async fn discover_root_devices_via_bind_ip(
     Ok(devices)
 }
 
+fn ssdp_search_targets() -> Vec<SearchTarget> {
+    vec![
+        SearchTarget::URN(INTERNET_GATEWAY_DEVICE_2),
+        SearchTarget::URN(INTERNET_GATEWAY_DEVICE_1),
+        SearchTarget::URN(WAN_IP_CONNECTION_2),
+        SearchTarget::URN(WAN_IP_CONNECTION_1),
+        SearchTarget::URN(WAN_PPP_CONNECTION_1),
+        SearchTarget::RootDevice,
+    ]
+}
+
+fn append_unique_ipv4_candidate(candidates: &mut Vec<Ipv4Addr>, value: &str) {
+    let Ok(IpAddr::V4(ip)) = value.parse::<IpAddr>() else {
+        return;
+    };
+    if ip != Ipv4Addr::UNSPECIFIED && !candidates.contains(&ip) {
+        candidates.push(ip);
+    }
+}
+
+fn dedupe_ipv4_candidates(candidates: Vec<Ipv4Addr>) -> Vec<Ipv4Addr> {
+    let mut unique = Vec::new();
+    for candidate in candidates {
+        if candidate != Ipv4Addr::UNSPECIFIED && !unique.contains(&candidate) {
+            unique.push(candidate);
+        }
+    }
+    unique
+}
+
+#[cfg(windows)]
+fn gateway_ips_for_bind_ip(bind_ip: IpAddr) -> Vec<Ipv4Addr> {
+    ipconfig::get_adapters()
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter(|adapter| {
+            adapter
+                .ip_addresses()
+                .iter()
+                .any(|candidate| *candidate == bind_ip)
+        })
+        .flat_map(|adapter| adapter.gateways().to_vec())
+        .filter_map(|gateway| match gateway {
+            IpAddr::V4(ip) if ip != Ipv4Addr::UNSPECIFIED => Some(ip),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn gateway_ips_for_bind_ip(_bind_ip: IpAddr) -> Vec<Ipv4Addr> {
+    Vec::new()
+}
+
 fn extract_location_header(response: &str) -> Option<String> {
     response.lines().find_map(|line| {
         let (name, value) = line.split_once(':')?;
@@ -412,7 +485,13 @@ fn extract_location_header(response: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_location_header, xml_escape};
+    use std::net::Ipv4Addr;
+
+    use super::{
+        append_unique_ipv4_candidate, dedupe_ipv4_candidates, extract_location_header,
+        ssdp_search_targets, xml_escape,
+    };
+    use rupnp::ssdp::SearchTarget;
 
     #[test]
     fn xml_escape_covers_port_mapping_description_chars() {
@@ -424,10 +503,39 @@ mod tests {
 
     #[test]
     fn extract_location_header_is_case_insensitive() {
-        let response = "HTTP/1.1 200 OK\r\nLOCATION: http://10.0.0.1/root.xml\r\nST: upnp:rootdevice\r\n\r\n";
+        let response =
+            "HTTP/1.1 200 OK\r\nLOCATION: http://10.0.0.1/root.xml\r\nST: upnp:rootdevice\r\n\r\n";
         assert_eq!(
             extract_location_header(response).as_deref(),
             Some("http://10.0.0.1/root.xml")
+        );
+    }
+
+    #[test]
+    fn ssdp_search_targets_include_igd_and_root_queries() {
+        let targets = ssdp_search_targets()
+            .into_iter()
+            .map(|target| target.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(targets.contains(&SearchTarget::RootDevice.to_string()));
+        assert!(
+            targets.contains(&"urn:schemas-upnp-org:device:InternetGatewayDevice:1".to_string())
+        );
+        assert!(targets.contains(&"urn:schemas-upnp-org:service:WANIPConnection:1".to_string()));
+    }
+
+    #[test]
+    fn ipv4_candidate_helpers_filter_and_dedupe() {
+        let mut candidates = Vec::new();
+        append_unique_ipv4_candidate(&mut candidates, "10.255.255.250");
+        append_unique_ipv4_candidate(&mut candidates, "10.255.255.250");
+        append_unique_ipv4_candidate(&mut candidates, "not-an-ip");
+        append_unique_ipv4_candidate(&mut candidates, "::1");
+
+        assert_eq!(
+            dedupe_ipv4_candidates(candidates),
+            vec!["10.255.255.250".parse::<Ipv4Addr>().unwrap()]
         );
     }
 }

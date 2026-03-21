@@ -1,12 +1,11 @@
-# KADKAD — Specification
+# Overlord Kad2 — Specification
 
-Imported into `overlord-kad-proto/docs` from `c:\prj\p2p\kadkad\KADKAD.md`.
-This copy is preserved as donor architecture and protocol background for the Overlord Kad transplant.
-It is reference material, not the canonical Overlord workspace spec.
+Overlord Kad2 architecture and implementation reference.
+This file is maintained in the current Overlord workspace under `overlord-agents/crates/overlord-kad-proto/docs/`.
 
 **Language**: Rust
 **Protocol**: eMule Kademlia v2 (Kad2), IPv4 only
-**Status**: Implementation in progress — this document is the authoritative high-level spec
+**Status**: Overlord Kad2 implementation reference for the current Rust workspace
 
 ---
 
@@ -22,8 +21,8 @@ It is reference material, not the canonical Overlord workspace spec.
 8. [DHT Operations](#8-dht-operations)
 9. [Obfuscation](#9-obfuscation)
 10. [UPnP](#10-upnp)
-11. [Local Index — Database Schema](#11-local-index--database-schema)
-12. [REST API](#12-rest-api)
+11. [Coordinator Integration And Persistence](#11-coordinator-integration-and-persistence)
+12. [Agent Control API](#12-agent-control-api)
 13. [Configuration](#13-configuration)
 14. [Logging](#14-logging)
 15. [Bootstrap](#15-bootstrap)
@@ -38,17 +37,17 @@ It is reference material, not the canonical Overlord workspace spec.
 
 ## 1. Goals
 
-Build a fully wire-compatible eMule Kad2 client library and daemon in Rust that can:
+Build a fully wire-compatible eMule Kad2 core and Overlord agent integration in Rust that can:
 
 - Join and participate in the live eMule Kad2 DHT network
 - Search for files by keyword
 - Find sources (peers) for a known file hash
 - Fetch file notes (ratings/comments)
 - Publish file availability and keywords into the DHT
-- Accumulate a persistent, queryable local index of everything seen
-- Expose all functionality via a REST API
-- Run as a foreground process (lifecycle managed by external tools such as pm2)
-- Be structured as a reusable library crate, not just an application
+- Feed the coordinator with search and passive-crawl results
+- Expose agent control and status through the internal Overlord agent HTTP surface
+- Run as a foreground process (lifecycle managed by external tools)
+- Be structured as reusable workspace crates, not just one application
 
 ---
 
@@ -87,49 +86,45 @@ libed2k's `traversal_algorithm` / `rpc_manager` / `observer` pattern informs our
 ## 4. Workspace Structure
 
 ```
-kadkad/
-├── Cargo.toml                  ← workspace root
-├── KADKAD.md                   ← this file
-├── KAD_PROTOCOL.md             ← wire-level Kad2 reference (packets, tags, semantics)
-├── crates/
-│   ├── kadkad-proto/           ← Kad2 wire codec: packet types, tag system, node ID
-│   ├── kadkad-routing/         ← routing table: zone tree, k-buckets, contacts
-│   ├── kadkad-net/             ← Tokio UDP transport, RPC manager, obfuscation
-│   ├── kadkad-dht/             ← DHT operations: bootstrap, lookup, search, publish
-│   ├── kadkad-index/           ← SQLite index: schema, queries, typed access
-│   └── kadkad-node/            ← top-level library: assembles all crates, REST API
-└── bin/
-    └── kadkad/                 ← daemon binary (thin shell over kadkad-node)
-        └── src/
-            └── main.rs
+p2p-overlord/
+├── overlord-agents/
+│   ├── Cargo.toml
+│   ├── overlord.toml.example
+│   └── crates/
+│       ├── overlord-kad-proto/    ← Kad2 wire codec: packet types, tag system, node ID
+│       ├── overlord-kad-routing/  ← routing table: zone tree, k-buckets, contacts
+│       ├── overlord-kad-net/      ← Tokio UDP transport, RPC manager, obfuscation
+│       ├── overlord-kad-dht/      ← DHT operations: bootstrap, lookup, search, publish
+│       ├── overlord-agent-common/ ← shared HTTP/control-plane contract for agents
+│       └── overlord-agent-emule/  ← Kad2 agent binary and coordinator integration
+└── overlord-be/
+    └── overlord-be-coordinator/   ← coordinator, result ingestion, search dispatch, snoop APIs
 ```
 
 ### Dependency Graph
 
 ```
-kadkad-proto
+overlord-kad-proto
     ↑
-kadkad-routing   (depends on kadkad-proto for NodeId, Contact types)
+overlord-kad-routing   (depends on overlord-kad-proto for NodeId, Contact types)
     ↑
-kadkad-net       (depends on kadkad-proto + kadkad-routing)
+overlord-kad-net       (depends on overlord-kad-proto + overlord-kad-routing)
     ↑
-kadkad-dht       (depends on kadkad-net + kadkad-routing)
+overlord-kad-dht       (depends on overlord-kad-net + overlord-kad-routing)
     ↑
-kadkad-index     (standalone, depends only on kadkad-proto for file hash types)
+overlord-agent-common
     ↑
-kadkad-node      (depends on all: kadkad-dht + kadkad-index, exposes REST API)
-    ↑
-bin/kadkad       (depends on kadkad-node only)
+overlord-agent-emule
 ```
 
-`kadkad-proto` and `kadkad-routing` have zero async, zero IO — they are pure data structures
+`overlord-kad-proto` and `overlord-kad-routing` have zero async, zero IO — they are pure data structures
 and transformations. This makes them trivially unit-testable.
 
 ---
 
 ## 5. Crate Responsibilities
 
-### `kadkad-proto`
+### `overlord-kad-proto`
 
 - All Kad2 packet types as Rust enums/structs
 - Binary encode/decode (`binrw` crate) — `&[u8]` ↔ `KadPacket`
@@ -140,7 +135,7 @@ and transformations. This makes them trivially unit-testable.
 - No `async`, no `tokio`, no networking of any kind
 - Test vectors for all packet types (see §17)
 
-### `kadkad-routing`
+### `overlord-kad-routing`
 
 - `RoutingTable` — binary zone tree (eMule style, not flat k-buckets)
 - `RoutingZone` — recursive zone node, splits when bin fills
@@ -150,7 +145,7 @@ and transformations. This makes them trivially unit-testable.
 - IP/subnet duplicate enforcement (max 1 per IP, max 10 per /24 subnet)
 - No `async`, no `tokio`, no networking
 
-### `kadkad-net`
+### `overlord-kad-net`
 
 - Tokio UDP socket wrapper
 - Outbound rate limiter (configurable packets/sec)
@@ -159,7 +154,7 @@ and transformations. This makes them trivially unit-testable.
 - Receives raw UDP datagrams, attempts decrypt, dispatches to `RpcManager`
 - `PacketTracker` — request/response correlation, per-IP flood protection
 
-### `kadkad-dht`
+### `overlord-kad-dht`
 
 - `Bootstrap` — load nodes.dat, send initial HELLO/PING, populate routing table
 - `NodeLookup` — iterative find_node traversal (ALPHA=3 parallel queries)
@@ -168,32 +163,30 @@ and transformations. This makes them trivially unit-testable.
 - `NotesSearch` — iterative notes lookup
 - `Publish` — keyword publish, source publish, notes publish
 - Scheduled republish timer
-- Firewall UDP tester (periodic, determines if node is reachable)
+- Exposes packet subscription/hooks used by the agent runtime for unsolicited Kad traffic
 
-### `kadkad-index`
+### `overlord-agent-common`
 
-- SQLite via `sqlx` (async, compile-time checked queries)
-- All table definitions and migrations (see §11)
-- Typed query functions: `insert_file`, `find_files_by_name`, `get_sources`, etc.
-- No knowledge of Kad2 protocol — takes plain typed structs
+- Shared agent HTTP/control plane types
+- Coordinator client for:
+  - registration
+  - result posting
+  - snoop flush/restore
+  - popular-hash retrieval
+- `IndexerService` trait and `IndexerServer` HTTP surface
 
-### `kadkad-node`
+### `overlord-agent-emule`
 
-- `Node` struct — owns all subsystems, single entry point
-- Loads and validates `config.toml`
-- Starts/stops `kadkad-dht` and `kadkad-index`
-- REST API server (`axum`, see §12)
-- UPnP port mapping via `igd` crate (see §10)
-- Hot-reload of log level via REST
-- Shared file list management (scan, hash, publish, re-verify)
-
-### `bin/kadkad`
-
-- Parse CLI args (`clap`)
-- Resolve config file path
-- Construct and start `Node`
-- Handle `SIGTERM`/`SIGINT` for clean shutdown
-- No business logic — thin shell only
+- Loads and validates Overlord TOML config
+- Starts/stops `overlord-kad-dht`
+- Owns:
+  - bootstrap retry
+  - passive crawl
+  - active search dispatch
+  - publish / seed-popular flow
+  - snoop restore/flush
+- Exposes the internal agent HTTP API (`axum`, see §12)
+- Persists agent-local state such as node ID, UDP key, and `nodes.dat`
 
 ---
 
@@ -229,7 +222,7 @@ For byte-level layouts, verified tag IDs, and packet-family notes, see `KAD_PROT
 
 > **KAD1_IGNORED**: Kad1 (legacy protocol) nodes are silently ignored. Packets with Kad1
 > opcodes are dropped without processing. No Kad1 packet types are implemented.
-> See KADKAD.md §20 Future Work if this changes.
+> See §20 Future Work if this changes.
 
 This simplifies the implementation significantly. The live network (2024+) is overwhelmingly Kad2.
 
@@ -416,329 +409,166 @@ The `gateway` override is for environments where SSDP discovery fails.
 
 ---
 
-## 11. Local Index — Database Schema
+## 11. Coordinator Integration And Persistence
 
-SQLite via `sqlx`. Database file: configurable, default `%APPDATA%\kadkad\index.db`.
-Schema migrations managed by `sqlx migrate`.
+In the current Overlord layout, durable indexing and search history belong to the coordinator,
+not the Kad crates and not the agent binary.
 
-**Goal**: accumulate a permanent, ever-growing index of everything seen on the network.
-Nothing expires. The user manages the database size.
+### Current Split Of Responsibility
 
-### Tables
+- `overlord-kad-*` crates:
+  - protocol, routing, transport, DHT, publish/search behavior
+- `overlord-agent-emule`:
+  - runtime orchestration
+  - active search execution
+  - passive crawl
+  - snoop queue restore/flush
+  - local persistence for Kad node state only
+- `overlord-be-coordinator`:
+  - agent registration
+  - search dispatch
+  - result batch ingestion
+  - snoop restore/flush backing
+  - popular-hash input for publish/seed flows
 
-```sql
--- Canonical file record. Ed2k hash is the unique identity.
-CREATE TABLE files (
-    hash            BLOB(16) PRIMARY KEY NOT NULL,
-    size            INTEGER  NOT NULL,
-    first_seen      INTEGER  NOT NULL,   -- unix timestamp (seconds)
-    last_seen       INTEGER  NOT NULL,
-    availability    INTEGER  NOT NULL DEFAULT 0  -- source count, updated per sighting
-) STRICT;
+### Agent-Local Persistent State
 
--- A file can appear under many names on the network.
-CREATE TABLE file_names (
-    id              INTEGER  PRIMARY KEY AUTOINCREMENT,
-    file_hash       BLOB(16) NOT NULL REFERENCES files(hash),
-    name            TEXT     NOT NULL,
-    first_seen      INTEGER  NOT NULL,
-    UNIQUE(file_hash, name)
-) STRICT;
+The Kad agent keeps only node-local runtime state on disk:
 
--- eMule metadata tags: codec, bitrate, duration, format, artist, album, etc.
--- One row per tag. Queryable.
-CREATE TABLE file_tags (
-    file_hash       BLOB(16) NOT NULL REFERENCES files(hash),
-    tag_name        TEXT     NOT NULL,
-    tag_value       TEXT     NOT NULL,
-    PRIMARY KEY (file_hash, tag_name)
-) STRICT;
+- stable Kad node ID
+- stable UDP key
+- cached `nodes.dat`
+- persisted Overlord agent `indexer_id`
 
--- Search history.
-CREATE TABLE searches (
-    id              INTEGER  PRIMARY KEY AUTOINCREMENT,
-    query           TEXT     NOT NULL,
-    search_type     TEXT     NOT NULL CHECK(search_type IN ('keyword','source','notes')),
-    started_at      INTEGER  NOT NULL,
-    completed_at    INTEGER,                   -- NULL while in progress
-    result_count    INTEGER  NOT NULL DEFAULT 0
-) STRICT;
+These files live under the agent `state_dir`.
 
--- Which files were found by which search.
-CREATE TABLE search_results (
-    search_id       INTEGER  NOT NULL REFERENCES searches(id),
-    file_hash       BLOB(16) NOT NULL REFERENCES files(hash),
-    seen_at         INTEGER  NOT NULL,
-    PRIMARY KEY (search_id, file_hash)
-) STRICT;
+### Coordinator-Owned Data
 
--- Full history of peers known to have a file.
--- No UNIQUE constraint — we keep all sightings.
-CREATE TABLE sources (
-    id              INTEGER  PRIMARY KEY AUTOINCREMENT,
-    file_hash       BLOB(16) NOT NULL REFERENCES files(hash),
-    ip              TEXT     NOT NULL,
-    udp_port        INTEGER  NOT NULL,
-    tcp_port        INTEGER  NOT NULL,
-    kad_version     INTEGER,
-    seen_at         INTEGER  NOT NULL
-) STRICT;
-CREATE INDEX idx_sources_hash ON sources(file_hash);
+The coordinator is the place where Overlord stores:
 
--- File notes and ratings from the network.
-CREATE TABLE notes (
-    id              INTEGER  PRIMARY KEY AUTOINCREMENT,
-    file_hash       BLOB(16) NOT NULL REFERENCES files(hash),
-    rating          INTEGER  CHECK(rating BETWEEN 0 AND 5),
-    comment         TEXT,
-    author_hash     BLOB(16),                  -- Kad node ID of commenter
-    seen_at         INTEGER  NOT NULL,
-    UNIQUE(file_hash, author_hash)
-) STRICT;
+- registered agents
+- search jobs
+- ingested result batches
+- indexed file records
+- snoop queue snapshots
+- popular-hash input used for publish seeding
 
--- Files we are sharing / publishing.
-CREATE TABLE shared_files (
-    hash            BLOB(16) NOT NULL REFERENCES files(hash),
-    path            TEXT     NOT NULL,
-    added_at        INTEGER  NOT NULL,
-    last_verified   INTEGER,                   -- last time we confirmed the file exists
-    PRIMARY KEY (hash)
-) STRICT;
-```
-
-### Index Design Notes
-
-- `file_tags` is one row per tag (queryable by tag name, e.g. `WHERE tag_name='codec'`)
-- `sources` is append-only (full history, no deduplication by IP)
-- `notes` deduplicates by `(file_hash, author_hash)` — one note per author per file
-- `shared_files.last_verified` is set to NULL when the file is found missing; the daemon removes the row and logs a warning
-- FTS (full-text search) index on `file_names.name` is recommended for large databases — add in a later migration when needed
+The precise database schema lives with the coordinator/backend, not in this Kad protocol crate.
 
 ---
 
-## 12. REST API
+## 12. Agent Control API
 
-Framework: `axum`. Bind: configurable (default `127.0.0.1:7373`). No authentication.
-All endpoints prefixed with `/api/v1`.
+Framework: `axum`.
+The Kad agent exposes an internal HTTP control surface, while the coordinator exposes the
+user-facing search API and the ingestion/coordination endpoints.
 
-### Node / Status
+### Agent Internal API
 
-```
-GET  /api/v1/status
-     → { node_id, ip, port, kad_version, routing_table_size,
-         active_searches, uptime_secs, obfuscation_enabled }
+Default bind address:
 
-GET  /api/v1/routing-table
-     → { zone_count, contact_count, contacts: [...] }
+- `127.0.0.1:13301` for `overlord-agent-emule`
 
-GET  /api/v1/routing-table/stats
-     → { contacts_by_version: {...}, zones: N, bins: N }
-```
-
-### Search
+Current endpoints:
 
 ```
-POST /api/v1/search/keyword
-     Body: { "query": "ubuntu 22.04" }
-     → 202 { "search_id": "uuid" }
+GET  /api/internal/health
+     → { ok, protocol, indexer_id, version }
 
-POST /api/v1/search/source
-     Body: { "hash": "aabbcc..." }    ← hex Ed2k hash
-     Requires the file to already exist in the local index with non-zero `files.size`.
-     Otherwise returns 400 because Kad2 source search needs the file size on the wire.
-     → 202 { "search_id": "uuid" }
+GET  /api/internal/stats
+     → { indexer_id, protocol, peers_connected, crawl_rate,
+          snoop_queue_depth, staging_queue_depth, uptime_secs }
 
-POST /api/v1/search/notes
-     Body: { "hash": "aabbcc..." }
-     Requires the file to already exist in the local index with non-zero `files.size`.
-     Otherwise returns 400 because Kad2 notes search needs the file size on the wire.
-     → 202 { "search_id": "uuid" }
-
-GET  /api/v1/search/{id}/events
-     → SSE stream; each event is a JSON SearchResult
-     Stream closes when search completes or times out.
-     Event types: "result", "complete", "error"
-
-GET  /api/v1/search/{id}/results
-     → { search_id, query, search_type, started_at, completed_at,
-         result_count, results: [...] }
-     Available immediately; returns partial results if search in progress.
-
-GET  /api/v1/searches
-     → [ { id, query, search_type, started_at, completed_at, result_count }, ... ]
-     Query params: ?limit=50&offset=0
-```
-
-### Index Queries
-
-```
-GET  /api/v1/index/files
-     Query params: ?name=ubuntu&limit=50&offset=0
-     → [ { hash, size, names: [...], first_seen, last_seen, availability }, ... ]
-
-GET  /api/v1/index/files/{hash}
-     → { hash, size, names, tags, first_seen, last_seen, availability }
-
-GET  /api/v1/index/files/{hash}/sources
-     → [ { ip, udp_port, tcp_port, kad_version, seen_at }, ... ]
-     `kad_version` may be null for Kad source-search results because the search-result tag set
-     does not include a Kad version field.
-
-GET  /api/v1/index/files/{hash}/notes
-     → [ { rating, comment, author_hash, seen_at }, ... ]
-     `author_hash` is the Kad/source ID carried as the result entry ID in `KADEMLIA2_SEARCH_RES`.
-
-GET  /api/v1/index/searches
-     → search history, same as /api/v1/searches
-```
-
-### Sharing & Publishing
-
-```
-GET  /api/v1/share
-     → [ { hash, path, size, added_at, last_verified }, ... ]
-
-POST /api/v1/share
-     Body: { "path": "C:\\files\\ubuntu.iso" }
-     Daemon computes hash, registers file, triggers publish.
-     → 202 { "hash": "aabbcc...", "size": N }
-
-DELETE /api/v1/share/{hash}
-     Removes from share list. Stops publishing. Does NOT delete from index.
-     → 204
-
-POST /api/v1/publish/{hash}
-     Manually trigger re-publish for a shared file.
+POST /api/internal/search
+     Body: SearchJob
      → 202
+
+POST /api/internal/seed-popular
+     Body: PopularHash[]
+     → 202
+
+POST /api/internal/config-update
+     Body: ConfigUpdate
+     → 202 or error if restart-required
 ```
 
-### Configuration
+### Coordinator API Touchpoints Used By The Agent
+
+Default coordinator bind address:
+
+- `127.0.0.1:13300`
+
+Current endpoints used by the Kad agent:
 
 ```
-GET  /api/v1/config
-     → current config as JSON (read-only view)
+POST /api/internal/register
+POST /api/internal/results
+POST /api/internal/snoop-flush
+GET  /api/internal/snoop-restore/{indexer_id}
+GET  /api/internal/popular-hashes
 
-POST /api/v1/config/log-level
-     Body: { "level": "debug" }    ← hot-reloadable
-     → 200
+POST /api/search
 ```
 
-### SSE Search Result Format
+### Search Flow In Overlord
 
-```json
-event: result
-data: {
-  "hash": "aabbccdd...",
-  "names": ["ubuntu-22.04.iso"],
-  "size": 1234567890,
-  "availability": 42,
-  "tags": { "type": "iso", "bitrate": null }
-}
-
-event: complete
-data: { "result_count": 87, "duration_ms": 38412 }
-
-event: error
-data: { "message": "search timed out" }
-```
+1. coordinator receives `POST /api/search`
+2. coordinator chooses registered Kad2 agents
+3. coordinator calls each agent's `/api/internal/search`
+4. agent runs Kad search in the background
+5. agent posts `ResultBatch` payloads back to the coordinator
+6. coordinator stores/aggregates the results
 
 ---
 
 ## 13. Configuration
 
-File: `%APPDATA%\kadkad\config.toml` (Windows), `~/.config/kadkad/config.toml` (Linux).
-Path can be overridden with `--config` CLI flag.
+Primary config file for the Rust agent workspace:
+
+- `overlord-agents/overlord.toml`
+- example: `overlord-agents/overlord.toml.example`
+
+Path can be overridden with `--config`.
 
 ```toml
-[node]
-# Kad2 node ID. "auto" = generate once, persist to disk.
-# Or explicit 32-char hex string.
-id = "auto"
+[coordinator]
+url = "http://127.0.0.1:13300"
 
-# UDP port for Kad2. 0 = random (chosen at startup, persisted).
-port = 4672
-
-# Local IP to bind the UDP socket.
-bind_ip = "0.0.0.0"
-
-
-[obfuscation]
-# RC4 obfuscation. Default on. Disable for debugging/Wireshark.
-enabled = true
-
-
-[upnp]
-enabled = true
-# Local interface for UPnP SSDP discovery.
-bind_ip = "0.0.0.0"
-# "auto" = discover gateway via SSDP. Or explicit IP e.g. "192.168.1.1".
-gateway = "auto"
-
-
-[api]
-# REST API bind address. Keep on localhost unless you know what you're doing.
-bind_ip = "127.0.0.1"
-port = 7373
-
+[agent]
+bind_addr = "127.0.0.1:13301"
+indexer_id_path = "./runtime/overlord-agent-emule.indexer-id"
+state_dir = "./runtime"
+hostname = "localhost"
+version = "0.1.0"
 
 [dht]
-# Path to nodes.dat for bootstrap. "" = auto-detect.
-# Auto-detect checks (in order):
-#   1. ./nodes.dat
-#   2. %APPDATA%\eMule\config\nodes.dat
-#   3. %APPDATA%\aMule\nodes.dat
-#   4. Hardcoded bootstrap nodes compiled into the binary
-nodes_dat = ""
-
-# Additional bootstrap nodes (ip:port pairs), tried alongside nodes.dat.
+udp_bind_addr = "0.0.0.0:41000"
+nodes_dat_path = "./runtime/overlord-kad.nodes.dat"
 bootstrap_nodes = []
-
-# Maximum contacts in the routing table.
-max_routing_table_size = 12000
-
-# Maximum simultaneous active searches.
-max_concurrent_searches = 5
-
-# Maximum outbound Kad2 UDP packets per second (global, all operations).
+search_timeout_secs = 45
+store_timeout_secs = 140
+republish_interval_secs = 18000
 max_outbound_pps = 50
-
-# Harvest-first search fanout and result caps.
 search_phase2_fanout = 50
 keyword_result_cap = 5000
 source_result_cap = 1000
 notes_result_cap = 1000
-
-# How often to re-publish our shared files (seconds). Default ~5 hours.
-republish_interval_secs = 18000
-
-
-[index]
-path = "%APPDATA%\\kadkad\\index.db"
+obfuscation_enabled = true
+enable_mock_results = false
 
 
 [log]
-# Log level: error | warn | info | debug | trace
-# Hot-reloadable via POST /api/v1/config/log-level
 level = "info"
-
-# Log file path.
-file = "%APPDATA%\\kadkad\\kadkad.log"
-
-# Maximum size of a single log file in megabytes before rotation.
-max_size_mb = 10
-
-# Number of rotated backup files to keep.
-max_backups = 3
 ```
 
 ### Config Notes
 
-- `node.id = "auto"` generates a stable random ID on first run, persists to `%APPDATA%\kadkad\node_id`
-- `node.port = 0` selects a random available port, persists it to `%APPDATA%\kadkad\port`
-- All `%APPDATA%` references are resolved at runtime via the OS environment
-- Only `log.level` is hot-reloadable; all other changes require daemon restart
+- `agent.state_dir` stores the stable Kad node ID, UDP key, and cached `nodes.dat`
+- the internal control server and Kad UDP socket are separate bind addresses
+- `enable_mock_results` defaults to `false` in the real Kad runtime
+- config updates for socket-shape/runtime-critical Kad settings currently require restart
 - Search defaults are intentionally indexer-oriented: fan out broadly in phase 2, collect a lot,
-  and filter later from the local index rather than narrowing aggressively during network search
+  and filter later in the coordinator/indexing plane rather than narrowing aggressively during network search
 
 ---
 
@@ -756,9 +586,9 @@ Library: `tracing` + `tracing-subscriber` + `tracing-appender`.
   - Search started / result received / completed / timed out
   - Publish sent / acknowledged
   - Obfuscation failure (packet dropped)
-  - UPnP mapping success / failure
-  - File shared / verified / removed
-  - REST API requests (at `debug` level)
+  - Popular-hash seed / republish cycle
+  - Snoop restore / flush
+  - Agent internal API requests (at `debug` level)
 
 ---
 
@@ -838,13 +668,15 @@ On each scheduled republish cycle, the daemon:
 
 Every crate has `#[cfg(test)]` modules.
 
-- `kadkad-proto`: encode/decode round-trips for every packet type using test vectors
-- `kadkad-routing`: zone split/merge, contact add/remove, IP limit enforcement, XOR distance ordering
-- `kadkad-index`: schema migrations, all query functions against in-memory SQLite
+- `overlord-kad-proto`: encode/decode round-trips for every packet type using test vectors
+- `overlord-kad-routing`: zone split/merge, contact add/remove, IP limit enforcement, XOR distance ordering
+- `overlord-kad-net`: transport, obfuscation, RPC matching, flood controls
+- `overlord-kad-dht`: bootstrap, traversal, search, publish
+- `overlord-agent-emule`: agent orchestration, config loading, coordinator integration
 
 ### Test Vectors
 
-Packet test vectors are stored as binary files in `kadkad-proto/tests/vectors/`.
+Packet test vectors should live with `overlord-kad-proto` when added to this workspace.
 Vectors are generated from reference implementations (eMule/aMule/libed2k) or captured from
 the live network via Wireshark.
 
@@ -865,8 +697,8 @@ cargo test -- --ignored
 
 ### Mock Transport
 
-`kadkad-net` exposes a `Transport` trait. A `MockTransport` implementation is provided for
-testing `kadkad-dht` operations without real UDP sockets. Supports:
+`overlord-kad-net` exposes a `Transport` trait. A `MockTransport` implementation is provided for
+testing `overlord-kad-dht` operations without real UDP sockets. Supports:
 - Injecting fake incoming packets
 - Capturing outgoing packets for assertion
 - Simulated packet loss and delay
@@ -877,7 +709,7 @@ testing `kadkad-dht` operations without real UDP sockets. Supports:
 
 ### Phase 1 — Codec & Routing Table
 
-Crates: `kadkad-proto`, `kadkad-routing`
+Crates: `overlord-kad-proto`, `overlord-kad-routing`
 
 - [ ] Workspace setup, `Cargo.toml`, CI skeleton
 - [ ] `NodeId` type with XOR metric, distance functions
@@ -898,7 +730,7 @@ table without any network. All unit tests pass.
 
 ### Phase 2 — Transport & RPC
 
-Crate: `kadkad-net`
+Crate: `overlord-kad-net`
 
 - [ ] `Transport` trait + `UdpTransport` (Tokio)
 - [ ] `MockTransport` for testing
@@ -913,7 +745,7 @@ Crate: `kadkad-net`
 
 ### Phase 3 — DHT Operations
 
-Crate: `kadkad-dht`
+Crate: `overlord-kad-dht`
 
 - [ ] Bootstrap algorithm
 - [ ] Iterative node lookup (find_node)
@@ -927,46 +759,23 @@ Crate: `kadkad-dht`
 
 **Milestone**: Can join the live Kad2 network, search for files, find sources, publish.
 
-### Phase 4 — Index
+### Phase 4 — Agent Integration
 
-Crate: `kadkad-index`
+Crates: `overlord-agent-common`, `overlord-agent-emule`
 
-- [ ] SQLite schema (all tables, migrations)
-- [ ] `IndexStore` struct with all query methods
-- [ ] In-memory SQLite for unit tests
-- [ ] Integration with DHT: auto-save all search results
+- [ ] TOML config loading
+- [ ] coordinator registration
+- [ ] active search dispatch
+- [ ] passive crawl result posting
+- [ ] snoop restore/flush
+- [ ] popular-hash seed / republish
+- [ ] graceful shutdown
 
-**Milestone**: All search results persisted to SQLite. Index queryable.
+**Milestone**: Kad agent runs inside Overlord and exchanges results with the coordinator.
 
-### Phase 5 — Node & REST API
+### Phase 5+ — Download / ED2K (separate planning)
 
-Crate: `kadkad-node`
-
-- [ ] `Config` loading from TOML
-- [ ] `Node` struct (owns all subsystems)
-- [ ] UPnP setup via `igd`
-- [ ] `axum` REST API (all endpoints)
-- [ ] SSE search event streaming
-- [ ] Hot-reload log level
-- [ ] Shared file management (add, remove, verify, hash computation)
-- [ ] Graceful shutdown
-
-**Milestone**: Full daemon. Start with config, query via REST, results in index.
-
-### Phase 6 — Binary
-
-Crate: `bin/kadkad`
-
-- [ ] `clap` CLI: `--config`, `--log-level`
-- [ ] Config path resolution and default fallback
-- [ ] Signal handling (SIGTERM/SIGINT → clean shutdown)
-- [ ] Exit codes (0 = clean, 1 = config error, 2 = network error)
-
-**Milestone**: Shippable daemon binary. Works with pm2 or equivalent.
-
-### Phase 7+ — Download (separate planning)
-
-Crate: TBD (likely `kadkad-transfer` in this workspace)
+Crate: TBD
 
 - ed2k peer TCP protocol
 - Slot negotiation
@@ -989,14 +798,10 @@ binrw = "0.14"
 # Byte buffer management
 bytes = "1"
 
-# Web framework (REST API)
+# Web framework (agent internal API / coordinator services)
 axum = "0.7"
-axum-extra = "0.9"          # SSE support
 tower = "0.4"
 tower-http = "0.5"
-
-# SQLite (async, compile-time checked queries)
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "migrate"] }
 
 # Error handling
 thiserror = "1"
@@ -1011,9 +816,6 @@ tracing-appender = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
-# UPnP port mapping
-igd = "0.12"
-
 # Crypto (obfuscation)
 rc4 = "0.1"                 # RC4 stream cipher
 crc32c = "0.6"              # CRC32C for node ID verification
@@ -1027,7 +829,7 @@ rand = "0.8"
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 
-# UUID for search IDs
+# UUIDs for jobs / indexers
 uuid = { version = "1", features = ["v4"] }
 
 # Async streaming
@@ -1049,8 +851,8 @@ tokio-stream = "0.1"
 ### ed2k Server Protocol
 
 > **FUTURE(server)**: The eMule TCP server protocol (connecting to central `server.met` nodes)
-> is out of scope for this library. The server protocol can be implemented as a separate crate
-> in this workspace (`kadkad-server`) without affecting the Kad2 core.
+> is out of scope for the current Kad workspace slice. The server protocol can be implemented as
+> a separate crate in `overlord-agents` without affecting the Kad2 core.
 
 ### Buddy System / Firewall NAT Traversal
 
@@ -1091,9 +893,9 @@ Use these comment markers so they are grep-able:
 
 ### Error Handling
 
-- `kadkad-proto`, `kadkad-routing`, `kadkad-index`: use `thiserror` for typed errors
-- `kadkad-net`, `kadkad-dht`: typed errors + `anyhow` for context in call sites
-- `kadkad-node`, `bin/kadkad`: `anyhow` throughout
+- `overlord-kad-proto`, `overlord-kad-routing`: use `thiserror` for typed errors
+- `overlord-kad-net`, `overlord-kad-dht`: typed errors + `anyhow` for context in call sites
+- `overlord-agent-common`, `overlord-agent-emule`: `anyhow` at orchestration boundaries
 
 Never `.unwrap()` in non-test code. Use `expect("reason")` only where a panic is the
 correct response to an invariant violation.

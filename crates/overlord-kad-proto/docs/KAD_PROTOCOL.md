@@ -1,13 +1,12 @@
 # KAD_PROTOCOL
 
-Imported into `overlord-kad-proto/docs` from `c:\prj\p2p\kadkad\KAD_PROTOCOL.md`.
-This copy is kept as a Kad2 wire-reference document for the Overlord Kad crates.
-Where the text says `this repository` or `kadkad`, read it as the donor implementation context unless explicitly updated in Overlord code.
+Kad2 wire-reference document for the Overlord Kad crates.
+This file is maintained in the current Overlord workspace under `overlord-agents/crates/overlord-kad-proto/docs/`.
 
 Deep Kad2 wire-protocol reference for this repository.
 
-This document is the packet- and tag-level companion to `KADKAD.md`.
-`KADKAD.md` owns architecture, crate responsibilities, API surface, and product-level behavior.
+This document is the packet- and tag-level companion to the architecture document in this directory.
+That companion document owns architecture, crate responsibilities, API surface, and product-level behavior.
 This file owns verified Kad2 wire facts, repo policy choices, and protocol notes that are easy to forget.
 
 ## 1. Scope And Authority
@@ -36,7 +35,7 @@ This file owns verified Kad2 wire facts, repo policy choices, and protocol notes
 This document explicitly distinguishes:
 
 - `Verified`: directly grounded in eMule and cross-checked with aMule where practical
-- `Repo policy`: an implementation decision in `kadkad` that is compatible with Kad2 but not itself a wire fact
+- `Repo policy`: an implementation decision in the current Overlord Kad runtime that is compatible with Kad2 but not itself a wire fact
 - `Pending`: behavior not fully audited yet and therefore not safe to treat as settled
 
 ## 2. Wire Framing Basics
@@ -77,10 +76,10 @@ Interpretation depends on the packet family and search mode.
 Status legend:
 
 - `used`: codec exists and the runtime currently sends/receives it
-- `codec`: packet is modeled in `kadkad-proto`, but runtime behavior is not fully wired or audited
+- `codec`: packet is modeled in `overlord-kad-proto`, but runtime behavior is not fully wired or audited
 - `reserved`: kept for future work only
 
-| Opcode | Name | Direction | Pairing | Purpose | Status In `kadkad` |
+| Opcode | Name | Direction | Pairing | Purpose | Status In Current Overlord Kad Runtime |
 |---|---|---|---|---|---|
 | `0x01` | `KADEMLIA2_BOOTSTRAP_REQ` | out | `BOOTSTRAP_RES` | ask a node for bootstrap contacts | used |
 | `0x09` | `KADEMLIA2_BOOTSTRAP_RES` | in | `BOOTSTRAP_REQ` | bootstrap response with sender info and contacts | used |
@@ -180,7 +179,7 @@ Verified eMule/aMule layout:
 
 Repo policy:
 
-- `kadkad` currently sends `0` only
+- the current Overlord Kad runtime currently sends `0` only
 - expression payloads and start-position pagination are still pending work
 
 ### `KADEMLIA2_SEARCH_SOURCE_REQ` (`0x34`)
@@ -203,9 +202,9 @@ Important:
 
 Repo policy:
 
-- the REST API stays hash-only
-- `kadkad-node` resolves `size` from the local index before starting the DHT search
-- if the file is unknown locally or indexed as size `0`, the API returns `400`
+- the agent/coordinator contract stays hash-only
+- `overlord-agent-emule` resolves `size` from coordinator-backed knowledge before starting the DHT search
+- if the file is unknown to the current indexing plane or indexed as size `0`, the request should fail early
 - `start_position` currently stays `0`
 
 ### `KADEMLIA2_SEARCH_NOTES_REQ` (`0x35`)
@@ -342,7 +341,7 @@ Layout:
 
 The table below focuses on Kad tags that matter directly to this repo's current search and publish work.
 
-| ID | Canonical Name In `kadkad` | Type | Meaning | Typical Appearance |
+| ID | Canonical Name In Overlord Kad Code | Type | Meaning | Typical Appearance |
 |---|---|---|---|---|
 | `0x01` | `FILENAME` | string | file name | keyword results, notes publish |
 | `0x02` | `FILESIZE` | uint32 or uint64 | file size low part or full size | keyword results, source publish, notes publish |
@@ -411,7 +410,7 @@ Verified:
 
 Repo behavior:
 
-- `kadkad-dht` now combines the two into one `u64`
+- `overlord-kad-dht` combines the two into one `u64`
 
 ## 6. Search Semantics
 
@@ -424,12 +423,12 @@ Verified from eMule behavior:
 
 Pending:
 
-- `kadkad` currently hashes the first significant word and sends a plain `SearchKeyReq`
+- the current Overlord Kad runtime hashes the first significant word and sends a plain `SearchKeyReq`
 - full expression serialization is not yet at eMule parity
 
 Repo policy:
 
-- `kadkad` is an indexer-first implementation
+- the Overlord Kad runtime is an indexer-first implementation
 - keyword searches intentionally collect broadly and defer narrowing/filtering until after indexing
 - the daemon therefore does not apply local query-word post-filtering by default
 
@@ -501,7 +500,7 @@ Verified eMule constant:
 
 Status:
 
-- the constant exists in `kadkad-proto`
+- the constant exists in `overlord-kad-proto`
 - the current traversal code now enforces eMule's `SEARCHTOLERANCE` gate before sending phase-2
   search packets, with the same LAN exemption idea
 - implementation detail that matters: the comparison must use the first XOR chunk in eMule's
@@ -509,7 +508,7 @@ Status:
 
 Repo policy:
 
-- unlike eMule's UI-oriented search manager, `kadkad` does not stop phase 2 at the closest `K`
+- unlike eMule's UI-oriented search manager, the Overlord Kad runtime does not stop phase 2 at the closest `K`
 - after applying `SEARCHTOLERANCE`, it fans out to a configurable broader responder set
 - default `search_phase2_fanout = 50`
 
@@ -531,7 +530,7 @@ Configured default caps:
 Why this differs from eMule:
 
 - eMule's search manager is optimized for interactive client searches and small result windows
-- `kadkad` is optimized for broad collection and later filtering in the local index
+- the Overlord Kad runtime is optimized for broad collection and later filtering in the coordinator/indexing plane
 
 ### Search Result String Decoding
 
@@ -543,7 +542,7 @@ Verified special case:
 
 Repo behavior:
 
-- `kadkad-proto` now mirrors that behavior for incoming `SEARCH_RES` tags only
+- `overlord-kad-proto` mirrors that behavior for incoming `SEARCH_RES` tags only
 - normal tag decoding elsewhere still uses the safer generic UTF-8-lossy path
 - on Windows, fallback uses the current ACP
 - on non-Windows, fallback uses Windows-1252 as the deterministic compatibility approximation
@@ -627,7 +626,7 @@ Pending:
 
 ## 8. Repo Policy Notes
 
-These are intentional `kadkad` decisions, not raw wire facts.
+These are intentional Overlord implementation decisions, not raw wire facts.
 
 ### Hash-Only Source And Notes API
 
@@ -709,17 +708,17 @@ Use this section first when re-auditing a protocol area.
 - `c:\prj\p2p\amule\src\kademlia\kademlia\Search.cpp`
   - portable cross-check for search serialization and parsing
 
-### `kadkad`
+### Overlord Kad Implementation
 
-- `crates/kadkad-proto/src/constants.rs`
+- `crates/overlord-kad-proto/src/constants.rs`
   - local opcode and tag registry
-- `crates/kadkad-proto/src/packet.rs`
+- `crates/overlord-kad-proto/src/packet.rs`
   - Rust wire layouts
-- `crates/kadkad-proto/src/tag.rs`
+- `crates/overlord-kad-proto/src/tag.rs`
   - tag encode/decode and helper constructors
-- `crates/kadkad-dht/src/traversal.rs`
+- `crates/overlord-kad-dht/src/traversal.rs`
   - search-phase request emission
-- `crates/kadkad-dht/src/types.rs`
+- `crates/overlord-kad-dht/src/types.rs`
   - keyword/source/notes result decoding
-- `crates/kadkad-node/src/api/search.rs`
-  - hash-only API policy and local indexed-size resolution
+- `crates/overlord-agent-emule/src/agent.rs`
+  - agent-side search dispatch, result posting, and coordinator integration policy
