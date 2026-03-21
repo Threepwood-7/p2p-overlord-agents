@@ -251,6 +251,10 @@ fn normalize_nat_config(config: &mut NatConfig) {
             *value = None;
         }
     }
+
+    if config.p2p.ssdp_local_port == Some(0) {
+        config.p2p.ssdp_local_port = None;
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +271,7 @@ mod tests {
             p2p: NatP2pConfig {
                 igd_ip: Some(String::new()),
                 minissdpd_socket: Some(" ".to_string()),
+                ssdp_local_port: Some(0),
                 external_ip_override: Some("\t".to_string()),
                 ..NatP2pConfig::default()
             },
@@ -276,6 +281,7 @@ mod tests {
 
         assert_eq!(config.p2p.igd_ip, None);
         assert_eq!(config.p2p.minissdpd_socket, None);
+        assert_eq!(config.p2p.ssdp_local_port, None);
         assert_eq!(config.p2p.external_ip_override, None);
     }
 

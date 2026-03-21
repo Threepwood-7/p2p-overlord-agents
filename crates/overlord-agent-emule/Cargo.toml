@@ -30,3 +30,6 @@ uuid.workspace = true
 [dependencies.clap]
 version = "4"
 features = ["derive"]
+
+[dev-dependencies]
+axum.workspace = true

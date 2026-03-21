@@ -1758,10 +1758,76 @@ impl OverlordAgentEmule {
 #[cfg(test)]
 mod tests {
     use super::{
-        EmuleAgentConfig, apply_networking_config, empty_networking_config, keyword_target,
-        significant_keyword_words,
+        EmuleAgentConfig, apply_networking_config, empty_networking_config, flush_snoop_queue,
+        keyword_target, restore_snoop_queue, significant_keyword_words,
     };
+    use crate::{config::SnoopQueueConfig, snoop_queue::SnoopQueue};
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        routing::{get, post},
+    };
+    use chrono::{TimeZone, Utc};
+    use overlord_agent_common::{CoordinatorClient, SnoopEntry};
     use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
+    use std::{net::SocketAddr, sync::Arc};
+    use tokio::sync::Mutex;
+    use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct MockCoordinatorState {
+        restore_entries: Arc<Vec<SnoopEntry>>,
+        flushed_entries: Arc<Mutex<Vec<SnoopEntry>>>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct FlushPayload {
+        indexer_id: Uuid,
+        entries: Vec<SnoopEntry>,
+    }
+
+    async fn restore_handler(
+        Path(_indexer_id): Path<Uuid>,
+        State(state): State<MockCoordinatorState>,
+    ) -> Json<Vec<SnoopEntry>> {
+        Json(state.restore_entries.as_ref().clone())
+    }
+
+    async fn flush_handler(
+        State(state): State<MockCoordinatorState>,
+        Json(payload): Json<FlushPayload>,
+    ) -> Json<serde_json::Value> {
+        let mut entries = state.flushed_entries.lock().await;
+        assert_eq!(
+            payload.indexer_id,
+            Uuid::from_u128(0x22222222222222222222222222222222)
+        );
+        *entries = payload.entries;
+        Json(serde_json::json!({ "accepted": true }))
+    }
+
+    async fn spawn_mock_coordinator(
+        restore_entries: Vec<SnoopEntry>,
+    ) -> (SocketAddr, Arc<Mutex<Vec<SnoopEntry>>>) {
+        let flushed_entries = Arc::new(Mutex::new(Vec::new()));
+        let state = MockCoordinatorState {
+            restore_entries: Arc::new(restore_entries),
+            flushed_entries: Arc::clone(&flushed_entries),
+        };
+        let app = Router::new()
+            .route(
+                "/api/internal/snoop-restore/{indexer_id}",
+                get(restore_handler),
+            )
+            .route("/api/internal/snoop-flush", post(flush_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (addr, flushed_entries)
+    }
 
     #[test]
     fn significant_words_ignore_short_tokens() {
@@ -1802,5 +1868,29 @@ mod tests {
             config.nat.p2p.backend_order,
             vec![UPNP_RUPNP_BACKEND.to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn restore_and_flush_preserve_last_drained_at() {
+        let restored_entry = SnoopEntry {
+            query: "keyword:00112233445566778899aabbccddeeff".to_string(),
+            hash: None,
+            hit_count: 4,
+            first_seen: Utc.with_ymd_and_hms(2026, 3, 21, 10, 0, 0).unwrap(),
+            last_seen: Utc.with_ymd_and_hms(2026, 3, 21, 10, 5, 0).unwrap(),
+            last_drained_at: Some(Utc.with_ymd_and_hms(2026, 3, 21, 10, 6, 0).unwrap()),
+        };
+        let (addr, flushed_entries) = spawn_mock_coordinator(vec![restored_entry.clone()]).await;
+        let coordinator = CoordinatorClient::new(&format!("http://{addr}")).unwrap();
+        let queue = Arc::new(Mutex::new(SnoopQueue::new(SnoopQueueConfig::default())));
+        let indexer_id = Uuid::from_u128(0x22222222222222222222222222222222);
+
+        restore_snoop_queue(&coordinator, indexer_id, &queue).await;
+        flush_snoop_queue(&coordinator, indexer_id, &queue)
+            .await
+            .unwrap();
+
+        let flushed_entries = flushed_entries.lock().await.clone();
+        assert_eq!(flushed_entries, vec![restored_entry]);
     }
 }
