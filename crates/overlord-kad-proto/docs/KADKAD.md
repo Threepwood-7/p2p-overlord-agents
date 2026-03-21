@@ -184,7 +184,7 @@ and transformations. This makes them trivially unit-testable.
   - bootstrap retry
   - passive crawl
   - active search dispatch
-  - publish / seed-popular flow
+  - publish / seed-popular flow, including the synthetic fallback seed set used when the coordinator has no popular hashes yet
   - snoop restore/flush
 - Exposes the internal agent HTTP API (`axum`, see §12)
 - Persists agent-local state such as node ID, UDP key, and `nodes.dat`
@@ -708,6 +708,7 @@ On each scheduled republish cycle, the daemon:
 - On file add: immediate publish
 - Scheduled: every `republish_interval_secs` (default 18000s ≈ 5 hours)
 - Manual: `POST /api/v1/publish/{hash}`
+- Current cold-start behavior: once Kad bootstrap succeeds, `overlord-agent-emule` immediately runs one seed-popular pass. It prefers coordinator `popular_hashes`, and falls back to a fixed agent-local set of 40 synthetic eMule-style keyword+source publishes only when the coordinator returns an empty list.
 
 ---
 

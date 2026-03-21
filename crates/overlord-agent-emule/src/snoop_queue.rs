@@ -103,11 +103,13 @@ impl SnoopQueue {
             existing.set_hit_count(existing.hit_count().saturating_add(entry.hit_count()));
             existing.set_last_seen(existing.last_seen().max(entry.last_seen()));
             existing.set_first_seen(existing.first_seen().min(entry.first_seen()));
-            existing.set_last_drained_at(match (existing.last_drained_at(), entry.last_drained_at()) {
-                (Some(left), Some(right)) => Some(left.max(right)),
-                (Some(left), None) => Some(left),
-                (None, right) => right,
-            });
+            existing.set_last_drained_at(
+                match (existing.last_drained_at(), entry.last_drained_at()) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    (Some(left), None) => Some(left),
+                    (None, right) => right,
+                },
+            );
             return;
         }
         self.entries.insert(logical_key, entry);
@@ -204,7 +206,13 @@ mod tests {
         }
     }
 
-    fn source_entry(logical_key: &str, target: &str, start_position: u16, size: u64, seen_at: i64) -> SnoopEntry {
+    fn source_entry(
+        logical_key: &str,
+        target: &str,
+        start_position: u16,
+        size: u64,
+        seen_at: i64,
+    ) -> SnoopEntry {
         SnoopEntry::Source {
             logical_key: logical_key.to_string(),
             target: target.to_string(),

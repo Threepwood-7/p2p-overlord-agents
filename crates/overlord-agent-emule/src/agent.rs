@@ -56,6 +56,232 @@ const PASSIVE_BATCH_SIZE: usize = 50;
 const BOOTSTRAP_RETRY_SECS: u64 = 30;
 const SNOOP_FLUSH_SECS: u64 = 30;
 const PASSIVE_CRAWL_SECS: u64 = 45;
+const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyntheticPopularSeed {
+    title: &'static str,
+    size: u64,
+    source_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopularSeedingSource {
+    Coordinator,
+    SyntheticFallback,
+}
+
+impl PopularSeedingSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Coordinator => "coordinator",
+            Self::SyntheticFallback => "synthetic_fallback",
+        }
+    }
+}
+
+const SYNTHETIC_POPULAR_SEEDS: [SyntheticPopularSeed; 40] = [
+    SyntheticPopularSeed {
+        title: "10 hours of nyan cat.mp4",
+        size: 734_003_200,
+        source_count: 31,
+    },
+    SyntheticPopularSeed {
+        title: "mario paint quorlith orchestra live at the moon.avi",
+        size: 1_417_965_568,
+        source_count: 24,
+    },
+    SyntheticPopularSeed {
+        title: "dial-up symphony in c minor.mp3",
+        size: 92_381_184,
+        source_count: 19,
+    },
+    SyntheticPopularSeed {
+        title: "laser dolphin documentary 1997.mkv",
+        size: 2_486_124_544,
+        source_count: 16,
+    },
+    SyntheticPopularSeed {
+        title: "cat-powered data center walkthrough.iso",
+        size: 4_597_211_136,
+        source_count: 11,
+    },
+    SyntheticPopularSeed {
+        title: "unofficial windows 98 vaporwave patch.zip",
+        size: 803_471_360,
+        source_count: 27,
+    },
+    SyntheticPopularSeed {
+        title: "beep test but every beep is a fax machine.flac",
+        size: 558_366_720,
+        source_count: 14,
+    },
+    SyntheticPopularSeed {
+        title: "all your base orchestral finale.ogg",
+        size: 128_661_504,
+        source_count: 22,
+    },
+    SyntheticPopularSeed {
+        title: "retro hamster workstation benchmark.mov",
+        size: 1_934_155_776,
+        source_count: 17,
+    },
+    SyntheticPopularSeed {
+        title: "flying toaster championship finals.mp4",
+        size: 1_215_102_976,
+        source_count: 29,
+    },
+    SyntheticPopularSeed {
+        title: "synthwave aquarium screensaver collection.rar",
+        size: 677_478_400,
+        source_count: 13,
+    },
+    SyntheticPopularSeed {
+        title: "legend of the crystal modem season 1.epub",
+        size: 18_456_321,
+        source_count: 18,
+    },
+    SyntheticPopularSeed {
+        title: "very long train horn ambience.wav",
+        size: 2_812_747_776,
+        source_count: 12,
+    },
+    SyntheticPopularSeed {
+        title: "space pogo championship 2004.avi",
+        size: 943_128_576,
+        source_count: 15,
+    },
+    SyntheticPopularSeed {
+        title: "quantum potato driver pack.exe",
+        size: 421_388_288,
+        source_count: 9,
+    },
+    SyntheticPopularSeed {
+        title: "museum of broken gamepads.pdf",
+        size: 67_210_240,
+        source_count: 21,
+    },
+    SyntheticPopularSeed {
+        title: "the complete history of fake operating systems.mobi",
+        size: 44_992_610,
+        source_count: 10,
+    },
+    SyntheticPopularSeed {
+        title: "banana modem firmware 2.0.bin",
+        size: 134_742_016,
+        source_count: 8,
+    },
+    SyntheticPopularSeed {
+        title: "midnight subway cat rave.mkv",
+        size: 3_288_334_336,
+        source_count: 26,
+    },
+    SyntheticPopularSeed {
+        title: "ultra rare dancing clippy remix.mp3",
+        size: 77_414_400,
+        source_count: 23,
+    },
+    SyntheticPopularSeed {
+        title: "vhs rip of the internet weather channel.ts",
+        size: 5_188_911_104,
+        source_count: 14,
+    },
+    SyntheticPopularSeed {
+        title: "pocket calculator speedrun any percent.mp4",
+        size: 1_104_199_680,
+        source_count: 28,
+    },
+    SyntheticPopularSeed {
+        title: "wallpaper pack 5000 neon frogs.7z",
+        size: 612_892_672,
+        source_count: 20,
+    },
+    SyntheticPopularSeed {
+        title: "secret bonus disk of windows 3.11.iso",
+        size: 695_205_888,
+        source_count: 17,
+    },
+    SyntheticPopularSeed {
+        title: "24 hours of elevator jungle.mix.flac",
+        size: 1_544_269_824,
+        source_count: 12,
+    },
+    SyntheticPopularSeed {
+        title: "dot matrix printer concerto no 5.mp3",
+        size: 88_199_168,
+        source_count: 25,
+    },
+    SyntheticPopularSeed {
+        title: "home planet karaoke deluxe.iso",
+        size: 3_964_108_800,
+        source_count: 16,
+    },
+    SyntheticPopularSeed {
+        title: "samurai pizza modem chronicles.cbz",
+        size: 233_308_160,
+        source_count: 13,
+    },
+    SyntheticPopularSeed {
+        title: "the unbelievable toaster patch notes.txt",
+        size: 1_572_864,
+        source_count: 7,
+    },
+    SyntheticPopularSeed {
+        title: "moonbase solitaire hd installer.msi",
+        size: 376_877_056,
+        source_count: 11,
+    },
+    SyntheticPopularSeed {
+        title: "penguin disco server diagnostics.log.zip",
+        size: 190_513_152,
+        source_count: 9,
+    },
+    SyntheticPopularSeed {
+        title: "cybernetic accordion lessons vol 4.mp4",
+        size: 1_672_331_264,
+        source_count: 18,
+    },
+    SyntheticPopularSeed {
+        title: "fuzzy robot bedtime stories.aac",
+        size: 49_283_072,
+        source_count: 15,
+    },
+    SyntheticPopularSeed {
+        title: "ocean of blinking cursors documentary.mkv",
+        size: 2_965_983_232,
+        source_count: 19,
+    },
+    SyntheticPopularSeed {
+        title: "desktop goose world tour 2001.avi",
+        size: 821_051_392,
+        source_count: 24,
+    },
+    SyntheticPopularSeed {
+        title: "supercut of fake progress bars.webm",
+        size: 1_281_286_144,
+        source_count: 17,
+    },
+    SyntheticPopularSeed {
+        title: "portable rave lighthouse screensaver.scr",
+        size: 28_311_552,
+        source_count: 12,
+    },
+    SyntheticPopularSeed {
+        title: "greatest floppy disk solos anthology.flac",
+        size: 607_518_720,
+        source_count: 20,
+    },
+    SyntheticPopularSeed {
+        title: "galactic sandwich emulator setup.exe",
+        size: 509_607_936,
+        source_count: 14,
+    },
+    SyntheticPopularSeed {
+        title: "vintage webcam ghost sightings collection.mkv",
+        size: 2_118_541_312,
+        source_count: 22,
+    },
+];
 
 #[derive(Clone)]
 struct AgentStatePaths {
@@ -836,6 +1062,94 @@ async fn do_active_source_search(
     Ok(stats)
 }
 
+/// Builds the fixed synthetic seed list used when the coordinator has no popular hashes yet.
+fn synthetic_popular_hashes() -> Vec<PopularHash> {
+    SYNTHETIC_POPULAR_SEEDS
+        .iter()
+        .enumerate()
+        .map(|(index, seed)| synthetic_popular_hash(index, seed))
+        .collect()
+}
+
+/// Produces a deterministic fake Ed2k hash so the synthetic seed set is stable across restarts.
+fn synthetic_file_hash(index: usize, seed: &SyntheticPopularSeed) -> Ed2kHash {
+    let mut hasher = Md4::new();
+    hasher.update(
+        format!(
+            "overlord-synthetic-kad-seed|{index}|{}|{}|{}",
+            seed.title, seed.size, seed.source_count
+        )
+        .as_bytes(),
+    );
+    let digest: [u8; 16] = hasher.finalize().into();
+    Ed2kHash::from_bytes(digest)
+}
+
+fn synthetic_popular_hash(index: usize, seed: &SyntheticPopularSeed) -> PopularHash {
+    PopularHash {
+        hash: HashType::Ed2k(hex::encode(synthetic_file_hash(index, seed).0)),
+        canonical_name: seed.title.to_string(),
+        size: seed.size,
+        source_count: seed.source_count,
+    }
+}
+
+/// Chooses coordinator-provided hashes when available and otherwise falls back to the
+/// built-in synthetic seed set.
+fn select_popular_hashes_for_seeding(
+    hashes: Vec<PopularHash>,
+) -> (PopularSeedingSource, Vec<PopularHash>) {
+    if hashes.is_empty() {
+        (
+            PopularSeedingSource::SyntheticFallback,
+            synthetic_popular_hashes(),
+        )
+    } else {
+        (PopularSeedingSource::Coordinator, hashes)
+    }
+}
+
+/// Fetches the current seed set from the coordinator and applies the synthetic fallback only
+/// when the coordinator returned no popular hashes.
+async fn fetch_popular_hashes_for_seeding(
+    coordinator: &CoordinatorClient,
+) -> Result<(PopularSeedingSource, Vec<PopularHash>)> {
+    Ok(select_popular_hashes_for_seeding(
+        coordinator.popular_hashes().await?,
+    ))
+}
+
+/// Publishes one seeding batch and logs which source produced it.
+async fn seed_popular_from_source(
+    dht: &DhtNode,
+    source: PopularSeedingSource,
+    hashes: Vec<PopularHash>,
+) -> Result<()> {
+    info!(
+        "kad seeding source={} entries={}",
+        source.label(),
+        hashes.len()
+    );
+    seed_popular_impl(dht, hashes).await
+}
+
+async fn seed_popular_from_coordinator_or_fallback(
+    dht: &DhtNode,
+    coordinator: &CoordinatorClient,
+) -> Result<()> {
+    let (source, hashes) = fetch_popular_hashes_for_seeding(coordinator).await?;
+    seed_popular_from_source(dht, source, hashes).await
+}
+
+/// Returns the eMule high-ID source type used for source publishes in the non-firewalled case.
+fn emule_high_id_source_type(file_size: u64) -> u8 {
+    if file_size > EMULE_LARGE_FILE_SIZE_THRESHOLD {
+        4
+    } else {
+        1
+    }
+}
+
 async fn seed_popular_impl(dht: &DhtNode, hashes: Vec<PopularHash>) -> Result<()> {
     if !dht.is_bootstrapped() {
         anyhow::bail!("kad node is not bootstrapped yet");
@@ -847,6 +1161,9 @@ async fn seed_popular_impl(dht: &DhtNode, hashes: Vec<PopularHash>) -> Result<()
         let file_hash = Ed2kHash::from_str(&raw_hash)
             .with_context(|| format!("invalid Ed2k hash {raw_hash}"))?;
         let keyword_hash = keyword_target(&hash.canonical_name);
+        // Keep synthetic seed publishes indistinguishable from normal eMule-style content
+        // publishes: filename/filesize/source count on the keyword publish and the normal
+        // high-ID source port/type tags on the source publish.
         let keyword_tags = vec![
             Tag::filename(hash.canonical_name.clone()),
             Tag::filesize(hash.size),
@@ -858,7 +1175,11 @@ async fn seed_popular_impl(dht: &DhtNode, hashes: Vec<PopularHash>) -> Result<()
         let source_tags = vec![
             Tag::new_short(tag_name::SOURCEPORT, TagValue::U16(bind_addr.port())),
             Tag::new_short(tag_name::SOURCEUPORT, TagValue::U16(bind_addr.port())),
-            Tag::new_short(tag_name::SOURCETYPE, TagValue::U8(1)),
+            Tag::new_short(
+                tag_name::SOURCETYPE,
+                TagValue::U8(emule_high_id_source_type(hash.size)),
+            ),
+            Tag::filesize(hash.size),
         ];
         let _ = dht.publish_source(file_hash, source_tags).await;
     }
@@ -1670,12 +1991,18 @@ impl OverlordAgentEmule {
         let dht = runtime.dht.clone();
         let shutdown = Arc::clone(&runtime.shutdown);
         let state_paths = self.state_paths.clone();
+        let coordinator = self.coordinator.clone();
         runtime.tasks.lock().await.push(tokio::spawn(async move {
             while !shutdown.load(Ordering::Relaxed) && !dht.is_bootstrapped() {
                 match dht.bootstrap().await {
                     Ok(()) => {
                         if let Err(error) = persist_nodes_dat_for(&dht, &state_paths).await {
                             warn!("failed to persist nodes.dat after bootstrap: {error}");
+                        }
+                        if let Err(error) =
+                            seed_popular_from_coordinator_or_fallback(&dht, &coordinator).await
+                        {
+                            debug!("post-bootstrap seeding failed: {error}");
                         }
                         break;
                     }
@@ -1782,13 +2109,10 @@ impl OverlordAgentEmule {
                 if shutdown.load(Ordering::Relaxed) || !dht.is_bootstrapped() {
                     continue;
                 }
-                match coordinator.popular_hashes().await {
-                    Ok(hashes) => {
-                        if let Err(error) = seed_popular_impl(&dht, hashes).await {
-                            debug!("republish cycle failed: {error}");
-                        }
-                    }
-                    Err(error) => debug!("popular hash refresh failed: {error}"),
+                if let Err(error) =
+                    seed_popular_from_coordinator_or_fallback(&dht, &coordinator).await
+                {
+                    debug!("republish cycle failed: {error}");
                 }
             }
         }));
@@ -1798,8 +2122,11 @@ impl OverlordAgentEmule {
 #[cfg(test)]
 mod tests {
     use super::{
-        EmuleAgentConfig, apply_networking_config, empty_networking_config, flush_snoop_queue,
-        keyword_target, restore_snoop_queue, significant_keyword_words,
+        EMULE_LARGE_FILE_SIZE_THRESHOLD, EmuleAgentConfig, PopularSeedingSource,
+        SYNTHETIC_POPULAR_SEEDS, apply_networking_config, empty_networking_config,
+        emule_high_id_source_type, flush_snoop_queue, keyword_target, restore_snoop_queue,
+        select_popular_hashes_for_seeding, significant_keyword_words, synthetic_file_hash,
+        synthetic_popular_hashes,
     };
     use crate::{config::SnoopQueueConfig, snoop_queue::SnoopQueue};
     use axum::{
@@ -1808,9 +2135,9 @@ mod tests {
         routing::{get, post},
     };
     use chrono::{TimeZone, Utc};
-    use overlord_agent_common::{CoordinatorClient, SnoopEntry};
+    use overlord_agent_common::{CoordinatorClient, HashType, PopularHash, SnoopEntry};
     use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
-    use std::{net::SocketAddr, sync::Arc};
+    use std::{collections::HashSet, net::SocketAddr, sync::Arc};
     use tokio::sync::Mutex;
     use uuid::Uuid;
 
@@ -1907,6 +2234,61 @@ mod tests {
         assert_eq!(
             config.nat.p2p.backend_order,
             vec![UPNP_RUPNP_BACKEND.to_string()]
+        );
+    }
+
+    #[test]
+    fn synthetic_dataset_contains_expected_entry_count() {
+        assert_eq!(SYNTHETIC_POPULAR_SEEDS.len(), 40);
+    }
+
+    #[test]
+    fn synthetic_hashes_are_deterministic() {
+        let seed = &SYNTHETIC_POPULAR_SEEDS[0];
+        assert_eq!(synthetic_file_hash(0, seed), synthetic_file_hash(0, seed));
+    }
+
+    #[test]
+    fn synthetic_hashes_are_unique() {
+        let hashes = synthetic_popular_hashes();
+        let unique = hashes
+            .iter()
+            .map(|entry| match &entry.hash {
+                HashType::Ed2k(hash) => hash.clone(),
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(unique.len(), hashes.len());
+    }
+
+    #[test]
+    fn seeding_prefers_coordinator_hashes_when_present() {
+        let coordinator_hashes = vec![PopularHash {
+            hash: HashType::Ed2k("00112233445566778899aabbccddeeff".to_string()),
+            canonical_name: "ubuntu linux".to_string(),
+            size: 3_221_225_472,
+            source_count: 42,
+        }];
+
+        let (source, selected) = select_popular_hashes_for_seeding(coordinator_hashes.clone());
+
+        assert_eq!(source, PopularSeedingSource::Coordinator);
+        assert_eq!(selected, coordinator_hashes);
+    }
+
+    #[test]
+    fn seeding_falls_back_to_synthetic_hashes_when_empty() {
+        let (source, selected) = select_popular_hashes_for_seeding(Vec::new());
+
+        assert_eq!(source, PopularSeedingSource::SyntheticFallback);
+        assert_eq!(selected.len(), SYNTHETIC_POPULAR_SEEDS.len());
+    }
+
+    #[test]
+    fn emule_source_type_matches_large_file_convention() {
+        assert_eq!(emule_high_id_source_type(123), 1);
+        assert_eq!(
+            emule_high_id_source_type(EMULE_LARGE_FILE_SIZE_THRESHOLD + 1),
+            4
         );
     }
 

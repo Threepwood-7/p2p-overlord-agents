@@ -235,9 +235,15 @@ impl SnoopEntry {
     #[must_use]
     pub fn last_drained_at(&self) -> Option<DateTime<Utc>> {
         match self {
-            SnoopEntry::Keyword { last_drained_at, .. }
-            | SnoopEntry::Source { last_drained_at, .. }
-            | SnoopEntry::Notes { last_drained_at, .. } => last_drained_at.clone(),
+            SnoopEntry::Keyword {
+                last_drained_at, ..
+            }
+            | SnoopEntry::Source {
+                last_drained_at, ..
+            }
+            | SnoopEntry::Notes {
+                last_drained_at, ..
+            } => last_drained_at.clone(),
         }
     }
 

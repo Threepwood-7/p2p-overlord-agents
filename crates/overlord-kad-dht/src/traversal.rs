@@ -531,8 +531,8 @@ mod tests {
     use super::*;
     use overlord_kad_net::MockTransport;
     use overlord_kad_net::{ObfuscationLayer, RpcConfig};
-    use overlord_kad_proto::{KadPacket, NodeId};
     use overlord_kad_proto::{Ed2kHash, packet::SearchRes};
+    use overlord_kad_proto::{KadPacket, NodeId};
     use std::sync::Arc;
 
     #[test]

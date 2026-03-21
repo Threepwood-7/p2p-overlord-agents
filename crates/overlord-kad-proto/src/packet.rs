@@ -583,7 +583,10 @@ fn read_search_key_req(cursor: &mut Cursor<&[u8]>) -> Result<SearchKeyReq, Proto
     })
 }
 
-fn write_search_key_req(buf: &mut Cursor<Vec<u8>>, packet: &SearchKeyReq) -> Result<(), ProtoError> {
+fn write_search_key_req(
+    buf: &mut Cursor<Vec<u8>>,
+    packet: &SearchKeyReq,
+) -> Result<(), ProtoError> {
     buf.write_le(&packet.target)?;
     buf.write_le(&packet.start_position)?;
     buf.write_all(&packet.restrictive_payload)
