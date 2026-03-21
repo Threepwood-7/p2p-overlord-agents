@@ -6,17 +6,25 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::TryStreamExt;
 use overlord_agent_nat::{
     MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatStatus, PortMappingProvider,
     TransportProtocol, built_in_upnp_port_mapping_providers, default_upnp_backend_order,
 };
+use rupnp::{
+    Device, discover,
+    ssdp::{SearchTarget, URN},
+};
+use serde::Serialize;
 use tokio::{sync::RwLock, time::sleep};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug)]
 struct HarnessOptions {
+    mode: HarnessMode,
     backend: String,
+    search_target: String,
     bind_ip: Option<String>,
     igd_ip: Option<String>,
     external_ip_override: Option<String>,
@@ -31,6 +39,30 @@ struct HarnessOptions {
     ssdp_bind_addr: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HarnessMode {
+    Provider,
+    RawDiscover,
+}
+
+#[derive(Debug, Serialize)]
+struct RawDiscoverOutput {
+    mode: &'static str,
+    search_target: String,
+    timeout_secs: u64,
+    ssdp_bind_addr: Option<String>,
+    devices: Vec<RawDeviceSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct RawDeviceSummary {
+    url: String,
+    friendly_name: String,
+    device_type: String,
+    service_types: Vec<String>,
+    embedded_device_types: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -43,6 +75,43 @@ async fn main() -> Result<()> {
         info!("set SSDP_CLIENT_BIND_ADDR={ssdp_bind_addr}");
     }
 
+    match options.mode {
+        HarnessMode::Provider => run_provider_mode(&options).await?,
+        HarnessMode::RawDiscover => run_raw_discover_mode(&options).await?,
+    }
+
+    Ok(())
+}
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .try_init();
+}
+
+fn build_mappings(udp_port: u16, tcp_port: u16) -> Vec<MappingSpec> {
+    vec![
+        MappingSpec {
+            name: "kad".to_string(),
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), udp_port),
+            protocol: TransportProtocol::Udp,
+            exposure: MappingExposure::Required,
+            preferred_external_port: Some(udp_port),
+        },
+        MappingSpec {
+            name: "ed2k".to_string(),
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), tcp_port),
+            protocol: TransportProtocol::Tcp,
+            exposure: MappingExposure::Required,
+            preferred_external_port: Some(tcp_port),
+        },
+    ]
+}
+
+async fn run_provider_mode(options: &HarnessOptions) -> Result<()> {
     let providers = built_in_upnp_port_mapping_providers();
     let provider = providers
         .into_iter()
@@ -100,32 +169,43 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .without_time()
-        .try_init();
-}
+async fn run_raw_discover_mode(options: &HarnessOptions) -> Result<()> {
+    if options.cleanup_only {
+        bail!("--cleanup-only is only valid with --mode provider");
+    }
 
-fn build_mappings(udp_port: u16, tcp_port: u16) -> Vec<MappingSpec> {
-    vec![
-        MappingSpec {
-            name: "kad".to_string(),
-            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), udp_port),
-            protocol: TransportProtocol::Udp,
-            exposure: MappingExposure::Required,
-            preferred_external_port: Some(udp_port),
-        },
-        MappingSpec {
-            name: "ed2k".to_string(),
-            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), tcp_port),
-            protocol: TransportProtocol::Tcp,
-            exposure: MappingExposure::Required,
-            preferred_external_port: Some(tcp_port),
-        },
-    ]
+    let search_target = parse_search_target(&options.search_target)?;
+    info!(
+        "raw discover search_target={} timeout_secs={} bind_ip={:?} ssdp_bind_addr={:?}",
+        search_target,
+        options.discovery_timeout_secs,
+        options.bind_ip,
+        options.ssdp_bind_addr
+    );
+
+    let stream = discover(
+        &search_target,
+        Duration::from_secs(options.discovery_timeout_secs.max(1)),
+        None,
+    )
+    .await
+    .with_context(|| format!("raw rupnp::discover failed for {search_target}"))?;
+    let mut stream = Box::pin(stream);
+    let mut devices = Vec::new();
+    while let Some(device) = stream.try_next().await? {
+        devices.push(summarize_device(&device));
+    }
+
+    let output = RawDiscoverOutput {
+        mode: "raw_discover",
+        search_target: search_target.to_string(),
+        timeout_secs: options.discovery_timeout_secs,
+        ssdp_bind_addr: options.ssdp_bind_addr.clone(),
+        devices,
+    };
+    println!("=== raw_discover ===");
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
 }
 
 async fn cleanup_test_ports(
@@ -191,9 +271,18 @@ impl HarnessOptions {
         }
 
         Ok(Self {
+            mode: parse_mode(
+                values
+                    .remove("mode")
+                    .unwrap_or_else(|| "provider".to_string())
+                    .as_str(),
+            )?,
             backend: values
                 .remove("backend")
                 .unwrap_or_else(|| default_upnp_backend_order()[0].clone()),
+            search_target: values
+                .remove("search-target")
+                .unwrap_or_else(|| "rootdevice".to_string()),
             bind_ip: values.remove("bind-ip"),
             igd_ip: values.remove("igd-ip"),
             external_ip_override: values.remove("external-ip-override"),
@@ -207,6 +296,65 @@ impl HarnessOptions {
             skip_cleanup: flags.iter().any(|flag| flag == "skip-cleanup"),
             ssdp_bind_addr: values.remove("ssdp-bind-addr"),
         })
+    }
+}
+
+fn parse_mode(value: &str) -> Result<HarnessMode> {
+    match value {
+        "provider" => Ok(HarnessMode::Provider),
+        "raw-discover" => Ok(HarnessMode::RawDiscover),
+        other => bail!("unsupported --mode value {other}"),
+    }
+}
+
+fn parse_search_target(value: &str) -> Result<SearchTarget> {
+    Ok(match value {
+        "rootdevice" => SearchTarget::RootDevice,
+        "ssdp:all" | "all" => SearchTarget::All,
+        "igd1" => SearchTarget::URN(URN::device(
+            "schemas-upnp-org",
+            "InternetGatewayDevice",
+            1,
+        )),
+        "igd2" => SearchTarget::URN(URN::device(
+            "schemas-upnp-org",
+            "InternetGatewayDevice",
+            2,
+        )),
+        "wanip1" => SearchTarget::URN(URN::service(
+            "schemas-upnp-org",
+            "WANIPConnection",
+            1,
+        )),
+        "wanip2" => SearchTarget::URN(URN::service(
+            "schemas-upnp-org",
+            "WANIPConnection",
+            2,
+        )),
+        "wanppp1" => SearchTarget::URN(URN::service(
+            "schemas-upnp-org",
+            "WANPPPConnection",
+            1,
+        )),
+        other => other
+            .parse::<SearchTarget>()
+            .with_context(|| format!("invalid --search-target value {other}"))?,
+    })
+}
+
+fn summarize_device(device: &Device) -> RawDeviceSummary {
+    RawDeviceSummary {
+        url: device.url().to_string(),
+        friendly_name: device.friendly_name().to_string(),
+        device_type: device.device_type().to_string(),
+        service_types: device
+            .services_iter()
+            .map(|service| service.service_type().to_string())
+            .collect(),
+        embedded_device_types: device
+            .devices_iter()
+            .map(|embedded| embedded.device_type().to_string())
+            .collect(),
     }
 }
 
@@ -236,7 +384,9 @@ fn parse_u64(values: &HashMap<String, String>, key: &str, default: u64) -> Resul
 
 fn print_help() {
     println!("upnp_backend_harness");
+    println!("  --mode <provider|raw-discover> Harness mode, default provider");
     println!("  --backend <id>                 Backend id, default upnp_rupnp");
+    println!("  --search-target <target>       Raw discover target, default rootdevice");
     println!("  --bind-ip <ipv4>              nat.bind_ip override");
     println!("  --igd-ip <ipv4>               nat.igd_ip override");
     println!("  --ssdp-bind-addr <addr:port>  Override SSDP client bind address");
