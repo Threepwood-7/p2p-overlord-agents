@@ -38,7 +38,7 @@ listen_port = 41001
 
 [nat.p2p]
 enabled = false
-backend_order = ["upnp"]
+backend_order = ["upnp_rupnp"]
 igd_ip = ""
 discovery_timeout_secs = 5
 lease_duration_secs = 3600

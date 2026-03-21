@@ -14,7 +14,11 @@ pub use interfaces::{
     detect_interfaces, recommend_interface, resolve_bind_ip,
 };
 pub use manager::{NatManager, NatManagerBuilder};
-pub use provider::{NatCapableAgent, PortMappingProvider, RupnpPortMappingProvider};
+pub use provider::{
+    IgdPortMappingProvider, NatCapableAgent, PortMappingProvider, RupnpPortMappingProvider,
+    UPNP_IGD_BACKEND, UPNP_RUPNP_BACKEND, built_in_upnp_port_mapping_providers,
+    default_upnp_backend_order,
+};
 pub use reachability::{NoopReachabilityStrategy, ReachabilityStrategy};
 pub use types::{
     MappedEndpoint, MappingExposure, MappingSpec, NatStatus, NatStatusSnapshot, SelectedGateway,

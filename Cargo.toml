@@ -37,3 +37,4 @@ futures-util = "0.3"
 
 [patch.crates-io]
 rupnp = { path = "../ext-deps/rust/rupnp" }
+ssdp-client = { path = "../ext-deps/rust/ssdp-client" }

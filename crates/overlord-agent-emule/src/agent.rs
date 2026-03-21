@@ -20,8 +20,8 @@ use overlord_agent_nat::{
     AgentNatP2pConfig, AgentNetworkReport, AgentNetworkingConfig, AgentP2pConfig,
     InterfaceBindingSelection, InterfaceSelectionState, MappingExposure, MappingSpec,
     NatCapableAgent, NatManager, NatManagerBuilder, ResolvedInterfaceBindingReport,
-    RupnpPortMappingProvider, TransportProtocol, build_interface_binding_report,
-    detect_interfaces, recommend_interface, resolve_bind_ip,
+    TransportProtocol, build_interface_binding_report, built_in_upnp_port_mapping_providers,
+    default_upnp_backend_order, detect_interfaces, recommend_interface, resolve_bind_ip,
 };
 use tokio::{
     sync::{Mutex, Notify, RwLock},
@@ -33,10 +33,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use overlord_agent_common::{
-    AgentInterfacesView, ConfigUpdate, ContentType, CoordinatorClient, FileRecord, HashType, IndexerServer,
-    IndexerService, IndexerStats, PopularHash, Protocol, RegisterRequest, ResultBatch,
-    RunningIndexerServer, SearchEvent, SearchEventStatus, SearchJob, SearchKind, SnoopEntry, Source,
-    TagEntry,
+    AgentInterfacesView, ConfigUpdate, ContentType, CoordinatorClient, FileRecord, HashType,
+    IndexerServer, IndexerService, IndexerStats, PopularHash, Protocol, RegisterRequest,
+    ResultBatch, RunningIndexerServer, SearchEvent, SearchEventStatus, SearchJob, SearchKind,
+    SnoopEntry, Source, TagEntry,
 };
 use overlord_kad_dht::{
     DhtConfig, DhtNode, SearchResult, SourceResult,
@@ -230,7 +230,7 @@ impl OverlordAgentEmule {
             p2p: AgentNatP2pConfig {
                 enabled: config.nat.p2p.enabled,
                 backend_order: if config.nat.p2p.backend_order.is_empty() {
-                    vec!["upnp".to_string()]
+                    default_upnp_backend_order()
                 } else {
                     config.nat.p2p.backend_order.clone()
                 },
@@ -271,7 +271,10 @@ impl OverlordAgentEmule {
         Self::bootstrap_control_bind_addr(config)
     }
 
-    fn selected_control_bind_addr(config: &EmuleAgentConfig, bind_ip: Option<&str>) -> Result<SocketAddr> {
+    fn selected_control_bind_addr(
+        config: &EmuleAgentConfig,
+        bind_ip: Option<&str>,
+    ) -> Result<SocketAddr> {
         resolved_socket_addr(config.control.listen_port, bind_ip)
     }
 
@@ -300,7 +303,10 @@ impl OverlordAgentEmule {
         } else {
             (
                 InterfaceSelectionState::Error,
-                Some("selected interface does not currently resolve to an IPv4 bind address".to_string()),
+                Some(
+                    "selected interface does not currently resolve to an IPv4 bind address"
+                        .to_string(),
+                ),
             )
         };
 
@@ -348,7 +354,11 @@ impl OverlordAgentEmule {
     }
 
     async fn current_control_bind_addr(&self) -> Option<SocketAddr> {
-        self.control_server.lock().await.as_ref().map(|runtime| runtime.bind_addr)
+        self.control_server
+            .lock()
+            .await
+            .as_ref()
+            .map(|runtime| runtime.bind_addr)
     }
 
     async fn current_registration_url(&self, config: &EmuleAgentConfig) -> Result<String> {
@@ -365,7 +375,9 @@ impl OverlordAgentEmule {
     }
 
     async fn start_control_server(self: &Arc<Self>, bind_addr: SocketAddr) -> Result<()> {
-        let server = IndexerServer::new(Arc::clone(self)).spawn(bind_addr).await?;
+        let server = IndexerServer::new(Arc::clone(self))
+            .spawn(bind_addr)
+            .await?;
         let local_addr = server.local_addr();
         *self.control_server.lock().await = Some(ControlServerRuntime {
             bind_addr: local_addr,
@@ -374,7 +386,10 @@ impl OverlordAgentEmule {
         Ok(())
     }
 
-    async fn start_control_server_with_retry(self: &Arc<Self>, bind_addr: SocketAddr) -> Result<()> {
+    async fn start_control_server_with_retry(
+        self: &Arc<Self>,
+        bind_addr: SocketAddr,
+    ) -> Result<()> {
         let mut last_error = None;
         for _attempt in 0..20 {
             match self.start_control_server(bind_addr).await {
@@ -401,7 +416,10 @@ impl OverlordAgentEmule {
         self.restart_notify.notify_waiters();
     }
 
-    fn nat_mappings_from_config(config: &EmuleAgentConfig, bind_ip: Option<&str>) -> Result<Vec<MappingSpec>> {
+    fn nat_mappings_from_config(
+        config: &EmuleAgentConfig,
+        bind_ip: Option<&str>,
+    ) -> Result<Vec<MappingSpec>> {
         let kad_addr = resolved_socket_addr(config.p2p.kad.listen_port, bind_ip)
             .context("invalid p2p.kad.listen_port for NAT mapping")?;
         let ed2k_addr = resolved_socket_addr(config.p2p.ed2k.listen_port, bind_ip)
@@ -426,7 +444,10 @@ impl OverlordAgentEmule {
     }
 
     async fn sync_networking_config_from_coordinator(&self) -> Result<bool> {
-        let view = self.coordinator.agent_interfaces_view(self.indexer_id).await?;
+        let view = self
+            .coordinator
+            .agent_interfaces_view(self.indexer_id)
+            .await?;
         self.sync_networking_config_from_view(&view).await
     }
 
@@ -465,15 +486,11 @@ impl OverlordAgentEmule {
                     .then(|| state.last_error.clone())
                     .flatten()
             });
-        let p2p_error = self
-            .p2p_selection_state
-            .try_read()
-            .ok()
-            .and_then(|state| {
-                matches!(state.state, InterfaceSelectionState::Error)
-                    .then(|| state.last_error.clone())
-                    .flatten()
-            });
+        let p2p_error = self.p2p_selection_state.try_read().ok().and_then(|state| {
+            matches!(state.state, InterfaceSelectionState::Error)
+                .then(|| state.last_error.clone())
+                .flatten()
+        });
 
         let control_applied = Self::control_selection(&config).selection_confirmed
             && control_bind_addr.is_some_and(|bind_addr| {
@@ -610,7 +627,7 @@ impl OverlordAgentEmule {
         let nat_config = overlord_agent_nat::NatConfig {
             enabled: config.nat.p2p.enabled,
             backend_order: if config.nat.p2p.backend_order.is_empty() {
-                vec!["upnp".to_string()]
+                default_upnp_backend_order()
             } else {
                 config.nat.p2p.backend_order.clone()
             },
@@ -625,7 +642,7 @@ impl OverlordAgentEmule {
         let nat = Arc::new(
             NatManagerBuilder::new(nat_config)
                 .with_mappings(Self::nat_mappings_from_config(config, Some(bind_ip))?)
-                .with_provider(Arc::new(RupnpPortMappingProvider))
+                .with_providers(built_in_upnp_port_mapping_providers())
                 .build(),
         );
 
@@ -770,7 +787,10 @@ async fn do_active_keyword_search(
             &callback_client,
             job.job_id,
             indexer_id,
-            vec![mock_file_record(search_query(job)?, dht.bind_addr()?.to_string())],
+            vec![mock_file_record(
+                search_query(job)?,
+                dht.bind_addr()?.to_string(),
+            )],
             &mut stats,
         )
         .await?;
@@ -1298,7 +1318,11 @@ fn contact_to_entry(contact: Contact) -> ContactEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::{keyword_target, significant_keyword_words};
+    use super::{
+        EmuleAgentConfig, apply_networking_config, empty_networking_config, keyword_target,
+        significant_keyword_words,
+    };
+    use overlord_agent_nat::UPNP_RUPNP_BACKEND;
 
     #[test]
     fn significant_words_ignore_short_tokens() {
@@ -1313,6 +1337,28 @@ mod tests {
         assert_eq!(
             hex::encode(keyword_target("Torino Train").0),
             "b2bc3aa39f375069e7c27eb83ce6baf3"
+        );
+    }
+
+    #[test]
+    fn empty_networking_config_uses_explicit_rupnp_backend() {
+        assert_eq!(
+            empty_networking_config().nat.p2p.backend_order,
+            vec![UPNP_RUPNP_BACKEND.to_string()]
+        );
+    }
+
+    #[test]
+    fn apply_networking_config_preserves_explicit_backend_order() {
+        let mut config = EmuleAgentConfig::default();
+        let mut desired = empty_networking_config();
+        desired.nat.p2p.backend_order = vec![UPNP_RUPNP_BACKEND.to_string()];
+
+        apply_networking_config(&mut config, &desired);
+
+        assert_eq!(
+            config.nat.p2p.backend_order,
+            vec![UPNP_RUPNP_BACKEND.to_string()]
         );
     }
 }
@@ -1346,13 +1392,17 @@ fn empty_networking_config() -> AgentNetworkingConfig {
             bind_iface: None,
             bind_ip: None,
             selection_confirmed: false,
-            kad: AgentKadConfig { listen_port: 41_000 },
-            ed2k: AgentEd2kConfig { listen_port: 41_001 },
+            kad: AgentKadConfig {
+                listen_port: 41_000,
+            },
+            ed2k: AgentEd2kConfig {
+                listen_port: 41_001,
+            },
         },
         nat: AgentNatConfig {
             p2p: AgentNatP2pConfig {
                 enabled: false,
-                backend_order: vec!["upnp".to_string()],
+                backend_order: default_upnp_backend_order(),
                 igd_ip: None,
                 discovery_timeout_secs: 5,
                 lease_duration_secs: 3_600,
@@ -1375,7 +1425,7 @@ fn apply_networking_config(config: &mut EmuleAgentConfig, desired: &AgentNetwork
     config.p2p.ed2k.listen_port = desired.p2p.ed2k.listen_port;
     config.nat.p2p.enabled = desired.nat.p2p.enabled;
     config.nat.p2p.backend_order = if desired.nat.p2p.backend_order.is_empty() {
-        vec!["upnp".to_string()]
+        default_upnp_backend_order()
     } else {
         desired.nat.p2p.backend_order.clone()
     };
@@ -1408,9 +1458,13 @@ fn load_persisted_networking_config(config: &mut EmuleAgentConfig) -> Result<()>
     Ok(())
 }
 
-fn persist_networking_config(state_paths: &AgentStatePaths, desired: &AgentNetworkingConfig) -> Result<()> {
+fn persist_networking_config(
+    state_paths: &AgentStatePaths,
+    desired: &AgentNetworkingConfig,
+) -> Result<()> {
     ensure_parent_dir(&state_paths.networking_config_path)?;
-    let payload = serde_json::to_vec_pretty(desired).context("failed to serialize networking state")?;
+    let payload =
+        serde_json::to_vec_pretty(desired).context("failed to serialize networking state")?;
     fs::write(&state_paths.networking_config_path, payload).with_context(|| {
         format!(
             "failed to persist networking state to {}",
@@ -1428,7 +1482,7 @@ impl NatCapableAgent for OverlordAgentEmule {
             .map(|config| overlord_agent_nat::NatConfig {
                 enabled: config.nat.p2p.enabled,
                 backend_order: if config.nat.p2p.backend_order.is_empty() {
-                    vec!["upnp".to_string()]
+                    default_upnp_backend_order()
                 } else {
                     config.nat.p2p.backend_order.clone()
                 },
@@ -1446,7 +1500,9 @@ impl NatCapableAgent for OverlordAgentEmule {
         self.config
             .try_read()
             .ok()
-            .and_then(|config| Self::nat_mappings_from_config(&config, config.p2p.bind_ip.as_deref()).ok())
+            .and_then(|config| {
+                Self::nat_mappings_from_config(&config, config.p2p.bind_ip.as_deref()).ok()
+            })
             .unwrap_or_default()
     }
 }
@@ -1530,11 +1586,7 @@ impl IndexerService for OverlordAgentEmule {
             };
 
             let final_event = match outcome {
-                Ok(stats) if cancel.is_cancelled() => (
-                    SearchEventStatus::Cancelled,
-                    stats,
-                    None,
-                ),
+                Ok(stats) if cancel.is_cancelled() => (SearchEventStatus::Cancelled, stats, None),
                 Ok(stats) => (SearchEventStatus::Completed, stats, None),
                 Err(_error) if cancel.is_cancelled() => (
                     SearchEventStatus::Cancelled,
@@ -1642,7 +1694,11 @@ impl IndexerService for OverlordAgentEmule {
 }
 
 impl OverlordAgentEmule {
-    async fn spawn_background_tasks(&self, runtime: &AgentNetworkRuntime, config: &EmuleAgentConfig) {
+    async fn spawn_background_tasks(
+        &self,
+        runtime: &AgentNetworkRuntime,
+        config: &EmuleAgentConfig,
+    ) {
         let dht = runtime.dht.clone();
         let shutdown = Arc::clone(&runtime.shutdown);
         let state_paths = self.state_paths.clone();

@@ -1,6 +1,7 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
+use overlord_agent_nat::default_upnp_backend_order;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,7 +174,9 @@ impl Default for KadConfig {
 
 impl Default for Ed2kConfig {
     fn default() -> Self {
-        Self { listen_port: 41_001 }
+        Self {
+            listen_port: 41_001,
+        }
     }
 }
 
@@ -189,7 +192,7 @@ impl Default for NatP2pConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            backend_order: vec!["upnp".to_string()],
+            backend_order: default_upnp_backend_order(),
             igd_ip: None,
             discovery_timeout_secs: 5,
             lease_duration_secs: 3_600,
@@ -262,6 +265,7 @@ mod tests {
         ControlConfig, NatConfig, NatP2pConfig, P2pConfig, normalize_control_config,
         normalize_nat_config, normalize_p2p_config,
     };
+    use overlord_agent_nat::UPNP_RUPNP_BACKEND;
 
     #[test]
     fn normalize_nat_config_drops_blank_optional_fields() {
@@ -277,6 +281,14 @@ mod tests {
 
         assert_eq!(config.p2p.igd_ip, None);
         assert_eq!(config.p2p.external_ip_override, None);
+    }
+
+    #[test]
+    fn default_nat_config_uses_explicit_rupnp_backend() {
+        assert_eq!(
+            NatP2pConfig::default().backend_order,
+            vec![UPNP_RUPNP_BACKEND.to_string()]
+        );
     }
 
     #[test]

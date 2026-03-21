@@ -47,6 +47,11 @@ impl NatManagerBuilder {
         self
     }
 
+    pub fn with_providers(mut self, providers: Vec<Arc<dyn PortMappingProvider>>) -> Self {
+        self.providers.extend(providers);
+        self
+    }
+
     pub fn with_reachability(mut self, reachability: Arc<dyn ReachabilityStrategy>) -> Self {
         self.reachability = reachability;
         self
@@ -234,7 +239,10 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::types::{MappedEndpoint, MappingExposure, MappingSpec, TransportProtocol};
+    use crate::{
+        UPNP_IGD_BACKEND, UPNP_RUPNP_BACKEND, built_in_upnp_port_mapping_providers,
+        types::{MappedEndpoint, MappingExposure, MappingSpec, TransportProtocol},
+    };
 
     struct FakeProvider {
         name: &'static str,
@@ -302,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_once_uses_matching_backend() {
         let provider = Arc::new(FakeProvider {
-            name: "upnp",
+            name: UPNP_RUPNP_BACKEND,
             failures_before_success: AtomicUsize::new(0),
             release_calls: AtomicUsize::new(0),
         });
@@ -323,10 +331,62 @@ mod tests {
         .unwrap();
 
         let status = status.read().await.clone();
-        assert_eq!(status.backend.as_deref(), Some("upnp"));
+        assert_eq!(status.backend.as_deref(), Some(UPNP_RUPNP_BACKEND));
         assert_eq!(status.bind_ip.as_deref(), Some("192.168.1.10"));
         assert_eq!(status.igd_ip.as_deref(), Some("192.168.1.1"));
         assert_eq!(status.mappings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_reports_no_matching_backend_when_name_is_unknown() {
+        let status = Arc::new(RwLock::new(NatStatus::default()));
+        let config = NatConfig {
+            enabled: true,
+            backend_order: vec!["unknown_backend".to_string()],
+            ..NatConfig::default()
+        };
+
+        let error = reconcile_once(
+            &config,
+            &[sample_mapping()],
+            &[Arc::new(FakeProvider {
+                name: UPNP_RUPNP_BACKEND,
+                failures_before_success: AtomicUsize::new(0),
+                release_calls: AtomicUsize::new(0),
+            })],
+            Arc::clone(&status),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "no configured NAT backends are available"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_surfaces_scaffolded_igd_backend_error() {
+        let status = Arc::new(RwLock::new(NatStatus::default()));
+        let config = NatConfig {
+            enabled: true,
+            backend_order: vec![UPNP_IGD_BACKEND.to_string()],
+            ..NatConfig::default()
+        };
+
+        let error = reconcile_once(
+            &config,
+            &[sample_mapping()],
+            &built_in_upnp_port_mapping_providers(),
+            Arc::clone(&status),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!("{UPNP_IGD_BACKEND}: {UPNP_IGD_BACKEND} backend not implemented yet")
+        );
     }
 
     #[tokio::test]

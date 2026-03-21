@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::provider::default_upnp_backend_order;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NatConfig {
@@ -17,7 +19,7 @@ impl Default for NatConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            backend_order: vec!["upnp".to_string()],
+            backend_order: default_upnp_backend_order(),
             bind_ip: None,
             igd_ip: None,
             discovery_timeout_secs: 5,
@@ -25,5 +27,19 @@ impl Default for NatConfig {
             renew_margin_secs: 300,
             external_ip_override: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NatConfig;
+    use crate::provider::UPNP_RUPNP_BACKEND;
+
+    #[test]
+    fn default_nat_config_uses_explicit_rupnp_backend() {
+        assert_eq!(
+            NatConfig::default().backend_order,
+            vec![UPNP_RUPNP_BACKEND.to_string()]
+        );
     }
 }

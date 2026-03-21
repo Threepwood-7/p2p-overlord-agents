@@ -1079,9 +1079,11 @@ dependencies = [
  "ipconfig",
  "rupnp",
  "serde",
+ "serde_json",
  "socket2 0.5.10",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1452,6 +1454,7 @@ dependencies = [
  "roxmltree",
  "ssdp-client",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1671,13 +1674,13 @@ dependencies = [
 [[package]]
 name = "ssdp-client"
 version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04f4048b05716cdb270e1e5960d9dd4d428e7ceaa939ee5348a84f6e43d52df1"
 dependencies = [
  "futures-core",
  "genawaiter",
  "log",
+ "socket2 0.5.10",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
