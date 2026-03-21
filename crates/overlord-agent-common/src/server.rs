@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -9,7 +9,8 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::Value;
-use tokio::{sync::oneshot, task::JoinHandle};
+use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
+use tracing::warn;
 
 use crate::{
     service::IndexerService,
@@ -103,9 +104,15 @@ impl RunningIndexerServer {
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }
-        self.task
-            .await
-            .context("failed to join indexer control server task")?
+        match timeout(Duration::from_secs(2), &mut self.task).await {
+            Ok(result) => result.context("failed to join indexer control server task")?,
+            Err(_) => {
+                warn!("indexer control server shutdown timed out; aborting lingering connections");
+                self.task.abort();
+                let _ = self.task.await;
+                Ok(())
+            }
+        }
     }
 
     pub async fn wait(self) -> Result<()> {
@@ -221,5 +228,105 @@ where
             Json(serde_json::json!({ "error": error.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AgentNetworkReport, ConfigUpdate, IndexerStats, Protocol, SearchJob};
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+    };
+    use uuid::Uuid;
+
+    struct FakeService {
+        indexer_id: Uuid,
+    }
+
+    #[async_trait]
+    impl IndexerService for FakeService {
+        fn protocol(&self) -> Protocol {
+            Protocol::Kad2
+        }
+
+        fn version(&self) -> &str {
+            "test"
+        }
+
+        fn indexer_id(&self) -> Uuid {
+            self.indexer_id
+        }
+
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn search(&self, _job: SearchJob) -> Result<()> {
+            Ok(())
+        }
+
+        async fn stats(&self) -> Result<IndexerStats> {
+            Ok(IndexerStats {
+                indexer_id: self.indexer_id,
+                protocol: Protocol::Kad2,
+                peers_connected: 0,
+                crawl_rate: 0.0,
+                snoop_queue_depth: 0,
+                staging_queue_depth: 0,
+                uptime_secs: 0,
+                nat: None,
+                interface_report: None,
+            })
+        }
+
+        async fn apply_config(&self, _config: ConfigUpdate) -> Result<()> {
+            Ok(())
+        }
+
+        async fn interfaces(&self) -> Result<AgentNetworkReport> {
+            Err(anyhow::anyhow!("unused in test"))
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_wait_forever_for_idle_keep_alive_connections() {
+        let server = IndexerServer::new(Arc::new(FakeService {
+            indexer_id: Uuid::new_v4(),
+        }))
+        .spawn("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+
+        let mut socket = TcpStream::connect(server.local_addr()).await.unwrap();
+        socket
+            .write_all(
+                format!(
+                    "GET /api/internal/health HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n",
+                    server.local_addr()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let mut response = vec![0_u8; 2048];
+        let read = socket.read(&mut response).await.unwrap();
+        assert!(read > 0);
+        assert!(String::from_utf8_lossy(&response[..read]).contains("\"ok\":true"));
+
+        timeout(Duration::from_secs(5), server.shutdown())
+            .await
+            .expect("shutdown should complete even if the client keeps the socket open")
+            .unwrap();
+
+        let _ = socket.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
     }
 }
