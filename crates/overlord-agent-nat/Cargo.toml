@@ -10,6 +10,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 if-addrs = "0.13"
+miniupnpc = { path = "../miniupnpc" }
 rupnp = "3"
 serde.workspace = true
 socket2 = "0.5"

@@ -15,9 +15,9 @@ pub use interfaces::{
 };
 pub use manager::{NatManager, NatManagerBuilder};
 pub use provider::{
-    IgdPortMappingProvider, NatCapableAgent, PortMappingProvider, RupnpPortMappingProvider,
-    UPNP_IGD_BACKEND, UPNP_RUPNP_BACKEND, built_in_upnp_port_mapping_providers,
-    default_upnp_backend_order,
+    IgdPortMappingProvider, MiniupnpcPortMappingProvider, NatCapableAgent, PortMappingProvider,
+    RupnpPortMappingProvider, UPNP_IGD_BACKEND, UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND,
+    built_in_upnp_port_mapping_providers, default_upnp_backend_order,
 };
 pub use reachability::{NoopReachabilityStrategy, ReachabilityStrategy};
 pub use types::{

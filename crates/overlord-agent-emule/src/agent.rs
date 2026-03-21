@@ -235,6 +235,8 @@ impl OverlordAgentEmule {
                     config.nat.p2p.backend_order.clone()
                 },
                 igd_ip: config.nat.p2p.igd_ip.clone(),
+                minissdpd_socket: config.nat.p2p.minissdpd_socket.clone(),
+                ssdp_local_port: config.nat.p2p.ssdp_local_port,
                 discovery_timeout_secs: config.nat.p2p.discovery_timeout_secs,
                 lease_duration_secs: config.nat.p2p.lease_duration_secs,
                 renew_margin_secs: config.nat.p2p.renew_margin_secs,
@@ -633,6 +635,8 @@ impl OverlordAgentEmule {
             },
             bind_ip: Some(bind_ip.to_string()),
             igd_ip: config.nat.p2p.igd_ip.clone(),
+            minissdpd_socket: config.nat.p2p.minissdpd_socket.clone(),
+            ssdp_local_port: config.nat.p2p.ssdp_local_port,
             discovery_timeout_secs: config.nat.p2p.discovery_timeout_secs,
             lease_duration_secs: config.nat.p2p.lease_duration_secs,
             renew_margin_secs: config.nat.p2p.renew_margin_secs,
@@ -1322,7 +1326,7 @@ mod tests {
         EmuleAgentConfig, apply_networking_config, empty_networking_config, keyword_target,
         significant_keyword_words,
     };
-    use overlord_agent_nat::UPNP_RUPNP_BACKEND;
+    use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
 
     #[test]
     fn significant_words_ignore_short_tokens() {
@@ -1341,10 +1345,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_networking_config_uses_explicit_rupnp_backend() {
+    fn empty_networking_config_prefers_miniupnpc_then_rupnp() {
         assert_eq!(
             empty_networking_config().nat.p2p.backend_order,
-            vec![UPNP_RUPNP_BACKEND.to_string()]
+            vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string()
+            ]
         );
     }
 
@@ -1404,6 +1411,8 @@ fn empty_networking_config() -> AgentNetworkingConfig {
                 enabled: false,
                 backend_order: default_upnp_backend_order(),
                 igd_ip: None,
+                minissdpd_socket: None,
+                ssdp_local_port: None,
                 discovery_timeout_secs: 5,
                 lease_duration_secs: 3_600,
                 renew_margin_secs: 300,
@@ -1430,6 +1439,8 @@ fn apply_networking_config(config: &mut EmuleAgentConfig, desired: &AgentNetwork
         desired.nat.p2p.backend_order.clone()
     };
     config.nat.p2p.igd_ip = desired.nat.p2p.igd_ip.clone();
+    config.nat.p2p.minissdpd_socket = desired.nat.p2p.minissdpd_socket.clone();
+    config.nat.p2p.ssdp_local_port = desired.nat.p2p.ssdp_local_port;
     config.nat.p2p.discovery_timeout_secs = desired.nat.p2p.discovery_timeout_secs;
     config.nat.p2p.lease_duration_secs = desired.nat.p2p.lease_duration_secs;
     config.nat.p2p.renew_margin_secs = desired.nat.p2p.renew_margin_secs;
@@ -1488,6 +1499,8 @@ impl NatCapableAgent for OverlordAgentEmule {
                 },
                 bind_ip: config.p2p.bind_ip.clone(),
                 igd_ip: config.nat.p2p.igd_ip.clone(),
+                minissdpd_socket: config.nat.p2p.minissdpd_socket.clone(),
+                ssdp_local_port: config.nat.p2p.ssdp_local_port,
                 discovery_timeout_secs: config.nat.p2p.discovery_timeout_secs,
                 lease_duration_secs: config.nat.p2p.lease_duration_secs,
                 renew_margin_secs: config.nat.p2p.renew_margin_secs,

@@ -9,6 +9,8 @@ pub struct NatConfig {
     pub backend_order: Vec<String>,
     pub bind_ip: Option<String>,
     pub igd_ip: Option<String>,
+    pub minissdpd_socket: Option<String>,
+    pub ssdp_local_port: Option<u16>,
     pub discovery_timeout_secs: u64,
     pub lease_duration_secs: u32,
     pub renew_margin_secs: u64,
@@ -22,6 +24,8 @@ impl Default for NatConfig {
             backend_order: default_upnp_backend_order(),
             bind_ip: None,
             igd_ip: None,
+            minissdpd_socket: None,
+            ssdp_local_port: None,
             discovery_timeout_secs: 5,
             lease_duration_secs: 3_600,
             renew_margin_secs: 300,
@@ -33,13 +37,16 @@ impl Default for NatConfig {
 #[cfg(test)]
 mod tests {
     use super::NatConfig;
-    use crate::provider::UPNP_RUPNP_BACKEND;
+    use crate::provider::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
 
     #[test]
-    fn default_nat_config_uses_explicit_rupnp_backend() {
+    fn default_nat_config_prefers_miniupnpc_then_rupnp() {
         assert_eq!(
             NatConfig::default().backend_order,
-            vec![UPNP_RUPNP_BACKEND.to_string()]
+            vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string()
+            ]
         );
     }
 }

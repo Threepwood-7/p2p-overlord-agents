@@ -10,11 +10,14 @@ use crate::{
 };
 
 mod igd;
+mod miniupnpc;
 mod rupnp;
 
 pub use igd::IgdPortMappingProvider;
+pub use miniupnpc::MiniupnpcPortMappingProvider;
 pub use rupnp::RupnpPortMappingProvider;
 
+pub const UPNP_MINIUPNPC_BACKEND: &str = "upnp_miniupnpc";
 pub const UPNP_RUPNP_BACKEND: &str = "upnp_rupnp";
 pub const UPNP_IGD_BACKEND: &str = "upnp_igd";
 
@@ -44,11 +47,15 @@ pub trait PortMappingProvider: Send + Sync + 'static {
 }
 
 pub fn default_upnp_backend_order() -> Vec<String> {
-    vec![UPNP_RUPNP_BACKEND.to_string()]
+    vec![
+        UPNP_MINIUPNPC_BACKEND.to_string(),
+        UPNP_RUPNP_BACKEND.to_string(),
+    ]
 }
 
 pub fn built_in_upnp_port_mapping_providers() -> Vec<Arc<dyn PortMappingProvider>> {
     vec![
+        Arc::new(MiniupnpcPortMappingProvider),
         Arc::new(RupnpPortMappingProvider),
         Arc::new(IgdPortMappingProvider),
     ]
@@ -57,15 +64,18 @@ pub fn built_in_upnp_port_mapping_providers() -> Vec<Arc<dyn PortMappingProvider
 #[cfg(test)]
 mod tests {
     use super::{
-        UPNP_IGD_BACKEND, UPNP_RUPNP_BACKEND, built_in_upnp_port_mapping_providers,
-        default_upnp_backend_order,
+        UPNP_IGD_BACKEND, UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND,
+        built_in_upnp_port_mapping_providers, default_upnp_backend_order,
     };
 
     #[test]
-    fn default_upnp_backend_order_prefers_rupnp() {
+    fn default_upnp_backend_order_prefers_miniupnpc_then_rupnp() {
         assert_eq!(
             default_upnp_backend_order(),
-            vec![UPNP_RUPNP_BACKEND.to_string()]
+            vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string()
+            ]
         );
     }
 
@@ -78,7 +88,11 @@ mod tests {
 
         assert_eq!(
             provider_names,
-            vec![UPNP_RUPNP_BACKEND.to_string(), UPNP_IGD_BACKEND.to_string(),]
+            vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string(),
+                UPNP_IGD_BACKEND.to_string(),
+            ]
         );
     }
 }

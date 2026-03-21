@@ -85,6 +85,8 @@ pub struct NatP2pConfig {
     pub enabled: bool,
     pub backend_order: Vec<String>,
     pub igd_ip: Option<String>,
+    pub minissdpd_socket: Option<String>,
+    pub ssdp_local_port: Option<u16>,
     pub discovery_timeout_secs: u64,
     pub lease_duration_secs: u32,
     pub renew_margin_secs: u64,
@@ -194,6 +196,8 @@ impl Default for NatP2pConfig {
             enabled: false,
             backend_order: default_upnp_backend_order(),
             igd_ip: None,
+            minissdpd_socket: None,
+            ssdp_local_port: None,
             discovery_timeout_secs: 5,
             lease_duration_secs: 3_600,
             renew_margin_secs: 300,
@@ -249,7 +253,11 @@ fn normalize_p2p_config(config: &mut P2pConfig) {
 }
 
 fn normalize_nat_config(config: &mut NatConfig) {
-    for value in [&mut config.p2p.igd_ip, &mut config.p2p.external_ip_override] {
+    for value in [
+        &mut config.p2p.igd_ip,
+        &mut config.p2p.minissdpd_socket,
+        &mut config.p2p.external_ip_override,
+    ] {
         if value
             .as_deref()
             .is_some_and(|inner| inner.trim().is_empty())
@@ -265,13 +273,14 @@ mod tests {
         ControlConfig, NatConfig, NatP2pConfig, P2pConfig, normalize_control_config,
         normalize_nat_config, normalize_p2p_config,
     };
-    use overlord_agent_nat::UPNP_RUPNP_BACKEND;
+    use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
 
     #[test]
     fn normalize_nat_config_drops_blank_optional_fields() {
         let mut config = NatConfig {
             p2p: NatP2pConfig {
                 igd_ip: Some(String::new()),
+                minissdpd_socket: Some(" ".to_string()),
                 external_ip_override: Some("\t".to_string()),
                 ..NatP2pConfig::default()
             },
@@ -280,14 +289,18 @@ mod tests {
         normalize_nat_config(&mut config);
 
         assert_eq!(config.p2p.igd_ip, None);
+        assert_eq!(config.p2p.minissdpd_socket, None);
         assert_eq!(config.p2p.external_ip_override, None);
     }
 
     #[test]
-    fn default_nat_config_uses_explicit_rupnp_backend() {
+    fn default_nat_config_prefers_miniupnpc_then_rupnp() {
         assert_eq!(
             NatP2pConfig::default().backend_order,
-            vec![UPNP_RUPNP_BACKEND.to_string()]
+            vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string()
+            ]
         );
     }
 

@@ -3,6 +3,8 @@ members = [
     "crates/overlord-agent-common",
     "crates/overlord-agent-nat",
     "crates/overlord-agent-emule",
+    "crates/miniupnpc-sys",
+    "crates/miniupnpc",
     "crates/overlord-tools",
     "crates/overlord-kad-proto",
     "crates/overlord-kad-routing",

@@ -6,6 +6,10 @@ The first tool is `minirupnpc`, a small NAT/UPnP diagnostic executable built on 
 `overlord-agent-nat` public APIs. It is intended for real-network troubleshooting and
 mapping verification without launching the full agent runtime.
 
+The `upnp_miniupnpc` backend is backed by the local MiniUPnP source tree at
+`c:\prj\p2p\p2p-overlord\ext-deps\c\miniupnp`, and this workspace currently expects that tree to
+be checked out at the `miniupnpc_2_3_3` tag.
+
 ## Build
 
 ```bat
@@ -40,6 +44,12 @@ Force the lower-level SSDP bind override used during discovery debugging:
 cargo run -p overlord-tools --bin minirupnpc -- map --bind-ip 10.54.220.34 --ssdp-bind-ip 0.0.0.0
 ```
 
+Use the MiniUPnP backend with an explicit SSDP source port:
+
+```bat
+cargo run -p overlord-tools --bin minirupnpc -- map --backend upnp_miniupnpc --bind-ip 10.54.220.34 --ssdp-local-port 1900
+```
+
 Delete the standard test mappings:
 
 ```bat
@@ -63,6 +73,12 @@ miniupnpc.exe -l
 
 The workspace currently patches `rupnp` and `ssdp-client` to local instrumented checkouts,
 so `minirupnpc` automatically exercises those local debugging changes.
+
+For MiniUPnP, the same tool can also exercise:
+
+- `--backend upnp_miniupnpc`
+- `--minissdpd-socket ...` on future POSIX setups
+- `--ssdp-local-port ...` for explicit MiniUPnP SSDP source-port control
 
 ## Future Tools
 

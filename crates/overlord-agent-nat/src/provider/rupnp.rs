@@ -162,6 +162,8 @@ async fn reconcile_gateway(
     guard.backend = Some(backend_name.to_string());
     guard.bind_ip = config.bind_ip.clone();
     guard.igd_ip = config.igd_ip.clone();
+    guard.minissdpd_socket = config.minissdpd_socket.clone();
+    guard.ssdp_local_port = config.ssdp_local_port;
     guard.external_ip_override = config.external_ip_override.clone();
     guard.gateway = Some(gateway.selected_gateway(external_ip_text.clone()));
     guard.observed_external_addresses = external_ip_text.into_iter().collect();

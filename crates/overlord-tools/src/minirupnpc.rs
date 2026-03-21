@@ -8,8 +8,8 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use overlord_agent_nat::{
     MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatStatus, NatStatusSnapshot,
-    PortMappingProvider, TransportProtocol, built_in_upnp_port_mapping_providers,
-    default_upnp_backend_order,
+    PortMappingProvider, TransportProtocol, UPNP_MINIUPNPC_BACKEND,
+    built_in_upnp_port_mapping_providers, default_upnp_backend_order,
 };
 use tokio::{sync::RwLock, time::sleep};
 use tracing::info;
@@ -37,6 +37,10 @@ struct SharedArgs {
     bind_ip: Option<String>,
     #[arg(long)]
     igd_ip: Option<String>,
+    #[arg(long)]
+    minissdpd_socket: Option<String>,
+    #[arg(long)]
+    ssdp_local_port: Option<u16>,
     #[arg(long)]
     external_ip_override: Option<String>,
     #[arg(long, default_value_t = 5)]
@@ -161,7 +165,7 @@ fn default_backend_arg() -> String {
     default_upnp_backend_order()
         .into_iter()
         .next()
-        .unwrap_or_else(|| "upnp_rupnp".to_string())
+        .unwrap_or_else(|| UPNP_MINIUPNPC_BACKEND.to_string())
 }
 
 fn apply_ssdp_bind_override(ssdp_bind_ip: Option<&str>) {
@@ -187,6 +191,8 @@ fn build_config(args: &SharedArgs) -> NatConfig {
         backend_order: vec![args.backend.clone()],
         bind_ip: args.bind_ip.clone(),
         igd_ip: args.igd_ip.clone(),
+        minissdpd_socket: args.minissdpd_socket.clone(),
+        ssdp_local_port: args.ssdp_local_port,
         discovery_timeout_secs: args.discovery_timeout_secs,
         lease_duration_secs: args.lease_duration_secs,
         renew_margin_secs: args.renew_margin_secs,

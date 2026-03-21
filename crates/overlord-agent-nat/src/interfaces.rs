@@ -108,6 +108,8 @@ pub struct AgentNatP2pConfig {
     #[serde(default)]
     pub backend_order: Vec<String>,
     pub igd_ip: Option<String>,
+    pub minissdpd_socket: Option<String>,
+    pub ssdp_local_port: Option<u16>,
     pub discovery_timeout_secs: u64,
     pub lease_duration_secs: u32,
     pub renew_margin_secs: u64,

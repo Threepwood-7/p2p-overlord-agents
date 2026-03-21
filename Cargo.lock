@@ -974,6 +974,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "miniupnpc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "miniupnpc-sys",
+ "tracing",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "miniupnpc-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1077,6 +1094,7 @@ dependencies = [
  "futures-util",
  "if-addrs",
  "ipconfig",
+ "miniupnpc",
  "rupnp",
  "serde",
  "socket2 0.5.10",

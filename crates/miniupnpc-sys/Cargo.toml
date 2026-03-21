@@ -1,0 +1,11 @@
+[package]
+name = "miniupnpc-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Raw FFI bindings to the local MiniUPnPc source tree"
+links = "miniupnpc"
+
+[build-dependencies]
+cc = "1"
+
