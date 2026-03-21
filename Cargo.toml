@@ -40,5 +40,5 @@ uuid = { version = "1", features = ["serde", "v4"] }
 futures-util = "0.3"
 
 [patch.crates-io]
-rupnp = { path = "../ext-deps/rust/rupnp" }
-ssdp-client = { path = "../ext-deps/rust/ssdp-client" }
+rupnp = { git = "https://github.com/Threepwood-7/rupnp", tag = "v3.0.0-overlord.1" }
+ssdp-client = { git = "https://github.com/Threepwood-7/ssdp-client", tag = "v2.1.0-overlord.1" }

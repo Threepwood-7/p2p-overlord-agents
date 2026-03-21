@@ -1471,6 +1471,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 [[package]]
 name = "rupnp"
 version = "3.0.0"
+source = "git+https://github.com/Threepwood-7/rupnp?tag=v3.0.0-overlord.1#acee58162c3e2b50cf58f66d9d6a18d3bcd5f05d"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1704,6 +1705,7 @@ dependencies = [
 [[package]]
 name = "ssdp-client"
 version = "2.1.0"
+source = "git+https://github.com/Threepwood-7/ssdp-client?tag=v2.1.0-overlord.1#73e423262ab6e0fc36dc0ea17bdb93e345199e73"
 dependencies = [
  "futures-core",
  "genawaiter",
