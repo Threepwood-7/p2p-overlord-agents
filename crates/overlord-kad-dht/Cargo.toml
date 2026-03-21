@@ -10,6 +10,7 @@ overlord-kad-proto = { path = "../overlord-kad-proto" }
 overlord-kad-routing = { path = "../overlord-kad-routing" }
 overlord-kad-net = { path = "../overlord-kad-net" }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tokio-stream = "0.1"
 thiserror = { workspace = true }
 tracing = { workspace = true }

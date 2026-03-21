@@ -57,10 +57,46 @@ pub struct FileRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchKind {
+    Keyword,
+    Source,
+    Notes,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchJob {
     pub job_id: Uuid,
-    pub query: String,
+    pub kind: SearchKind,
+    pub query: Option<String>,
+    pub file_hash: Option<HashType>,
+    pub file_size: Option<u64>,
     pub callback_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchEventStatus {
+    Started,
+    BatchReceived,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchEvent {
+    pub job_id: Uuid,
+    pub indexer_id: Uuid,
+    pub status: SearchEventStatus,
+    pub result_count: Option<u32>,
+    pub batch_count: Option<u32>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchCancelRequest {
+    pub job_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

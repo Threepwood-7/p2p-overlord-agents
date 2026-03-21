@@ -8,6 +8,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(SEARCH_TIMEOUT_SECS);
@@ -19,6 +20,7 @@ pub fn search_keywords(
     target: NodeId,
     result_cap: usize,
     phase2_fanout: usize,
+    cancel: CancellationToken,
 ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SearchResult>(256);
     tokio::spawn(async move {
@@ -29,6 +31,7 @@ pub fn search_keywords(
             timeout: SEARCH_TIMEOUT,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
+            cancel: cancel.clone(),
             result_tx: Some(raw_tx),
         };
 
@@ -37,7 +40,14 @@ pub fn search_keywords(
         });
 
         let mut seen_hashes = HashSet::new();
-        while let Some((hash, tags)) = raw_rx.recv().await {
+        loop {
+            let next = tokio::select! {
+                _ = cancel.cancelled() => break,
+                next = raw_rx.recv() => next,
+            };
+            let Some((hash, tags)) = next else {
+                break;
+            };
             if seen_hashes.len() >= result_cap {
                 break;
             }
@@ -68,6 +78,7 @@ pub fn search_sources(
     file_size: u64,
     result_cap: usize,
     phase2_fanout: usize,
+    cancel: CancellationToken,
 ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<SourceResult>(256);
     let target = NodeId::from_bytes(file_hash.0);
@@ -80,6 +91,7 @@ pub fn search_sources(
             timeout: SEARCH_TIMEOUT,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
+            cancel: cancel.clone(),
             result_tx: Some(raw_tx),
         };
 
@@ -88,7 +100,14 @@ pub fn search_sources(
         });
 
         let mut seen_sources = HashSet::<(Ipv4Addr, u16, u16)>::new();
-        while let Some((hash, tags)) = raw_rx.recv().await {
+        loop {
+            let next = tokio::select! {
+                _ = cancel.cancelled() => break,
+                next = raw_rx.recv() => next,
+            };
+            let Some((hash, tags)) = next else {
+                break;
+            };
             if seen_sources.len() >= result_cap {
                 break;
             }
@@ -119,6 +138,7 @@ pub fn search_notes(
     file_size: u64,
     result_cap: usize,
     phase2_fanout: usize,
+    cancel: CancellationToken,
 ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
     let (tx, rx) = mpsc::channel::<NoteResult>(256);
     let target = NodeId::from_bytes(file_hash.0);
@@ -131,6 +151,7 @@ pub fn search_notes(
             timeout: SEARCH_TIMEOUT,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout,
+            cancel: cancel.clone(),
             result_tx: Some(raw_tx),
         };
 
@@ -139,7 +160,14 @@ pub fn search_notes(
         });
 
         let mut seen_authors = HashSet::new();
-        while let Some((author_id, tags)) = raw_rx.recv().await {
+        loop {
+            let next = tokio::select! {
+                _ = cancel.cancelled() => break,
+                next = raw_rx.recv() => next,
+            };
+            let Some((author_id, tags)) = next else {
+                break;
+            };
             if seen_authors.len() >= result_cap {
                 break;
             }

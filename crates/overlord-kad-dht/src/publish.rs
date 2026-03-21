@@ -10,6 +10,7 @@ use overlord_kad_proto::{
 };
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(STORE_TIMEOUT_SECS);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,6 +37,7 @@ pub async fn publish_keyword(
             timeout: PUBLISH_TIMEOUT,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout: K,
+            cancel: CancellationToken::new(),
             result_tx: None,
         },
     )
@@ -92,6 +94,7 @@ pub async fn publish_source(
             timeout: PUBLISH_TIMEOUT,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout: K,
+            cancel: CancellationToken::new(),
             result_tx: None,
         },
     )
@@ -146,6 +149,7 @@ pub async fn publish_notes(
             timeout: PUBLISH_TIMEOUT,
             query_timeout: QUERY_TIMEOUT,
             phase2_fanout: K,
+            cancel: CancellationToken::new(),
             result_tx: None,
         },
     )

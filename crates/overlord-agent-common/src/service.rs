@@ -16,6 +16,7 @@ pub trait IndexerService: Send + Sync + 'static {
     async fn start(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
     async fn search(&self, job: SearchJob) -> Result<()>;
+    async fn cancel_search(&self, job_id: Uuid) -> Result<()>;
     async fn stats(&self) -> Result<IndexerStats>;
     async fn apply_config(&self, config: ConfigUpdate) -> Result<()>;
 

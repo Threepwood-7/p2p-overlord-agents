@@ -15,6 +15,6 @@ pub use server::{IndexerServer, RunningIndexerServer};
 pub use service::IndexerService;
 pub use types::{
     AgentInterfacesView, ConfigUpdate, ContentType, FileRecord, HashType, IndexerRegistration, IndexerStats,
-    PopularHash, Protocol, RegisterRequest, RegistrationResponse, ResultBatch, SearchJob,
-    SnoopEntry, Source, TagEntry,
+    PopularHash, Protocol, RegisterRequest, RegistrationResponse, ResultBatch, SearchCancelRequest,
+    SearchEvent, SearchEventStatus, SearchJob, SearchKind, SnoopEntry, Source, TagEntry,
 };

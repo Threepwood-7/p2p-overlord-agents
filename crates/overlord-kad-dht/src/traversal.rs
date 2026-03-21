@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub struct TraversalConfig {
     pub timeout: Duration,
     pub query_timeout: Duration, // per-node query timeout
     pub phase2_fanout: usize,
+    pub cancel: CancellationToken,
     /// Optional streaming hook for phase-2 SEARCH_RES entries.
     ///
     /// We keep `search_entries` in the final `TraversalResult` for callers that still
@@ -78,6 +80,7 @@ pub async fn run_traversal(
         timeout,
         query_timeout,
         phase2_fanout,
+        cancel,
         result_tx,
     } = config;
     let deadline = Instant::now() + timeout;
@@ -110,6 +113,9 @@ pub async fn run_traversal(
         JoinSet::new();
 
     loop {
+        if cancel.is_cancelled() {
+            break;
+        }
         let now = Instant::now();
         if now >= deadline {
             break;
@@ -154,7 +160,10 @@ pub async fn run_traversal(
             break;
         }
 
-        let next = tokio::time::timeout(remaining, join_set.join_next()).await;
+        let next = tokio::select! {
+            _ = cancel.cancelled() => break,
+            next = tokio::time::timeout(remaining, join_set.join_next()) => next,
+        };
 
         let result = match next {
             Ok(Some(Ok(r))) => r,
@@ -284,6 +293,7 @@ pub async fn run_traversal(
                 query_timeout,
                 deadline,
                 phase2_fanout,
+                &cancel,
                 result_tx,
             )
             .await
@@ -305,8 +315,12 @@ async fn run_search_phase(
     query_timeout: Duration,
     deadline: Instant,
     phase2_fanout: usize,
+    cancel: &CancellationToken,
     result_tx: Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
 ) -> Vec<(Ed2kHash, Vec<overlord_kad_proto::Tag>)> {
+    if cancel.is_cancelled() {
+        return vec![];
+    }
     let now = Instant::now();
     if now >= deadline {
         return vec![];
@@ -362,12 +376,18 @@ async fn run_search_phase(
     let result_tx = result_tx;
 
     loop {
+        if cancel.is_cancelled() {
+            break;
+        }
         let now = Instant::now();
         if now >= phase_deadline {
             break;
         }
         let remaining = phase_deadline - now;
-        match tokio::time::timeout(remaining, unsolicited.recv()).await {
+        match tokio::select! {
+            _ = cancel.cancelled() => break,
+            result = tokio::time::timeout(remaining, unsolicited.recv()) => result,
+        } {
             Ok(Ok((KadPacket::SearchRes(sr), from))) => {
                 if !queried_addrs.contains(&from) {
                     trace!("ignoring SEARCH_RES from unqueried sender {}", from);
@@ -710,6 +730,7 @@ mod tests {
             Duration::from_millis(100),
             Instant::now() + Duration::from_millis(300),
             10,
+            &CancellationToken::new(),
             Some(result_tx),
         )
         .await;

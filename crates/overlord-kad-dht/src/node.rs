@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::{Mutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Configuration for DhtNode.
@@ -306,6 +307,7 @@ impl DhtNode {
             timeout: Duration::from_secs(45),
             query_timeout: Duration::from_secs(10),
             phase2_fanout: self.inner.config.search_phase2_fanout,
+            cancel: CancellationToken::new(),
             result_tx: None,
         };
 
@@ -338,6 +340,14 @@ impl DhtNode {
         &self,
         target: NodeId,
     ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
+        self.search_keywords_with_cancel(target, CancellationToken::new())
+    }
+
+    pub fn search_keywords_with_cancel(
+        &self,
+        target: NodeId,
+        cancel: CancellationToken,
+    ) -> impl tokio_stream::Stream<Item = SearchResult> + Send + 'static {
         let initial = {
             match self.inner.routing_table.try_lock() {
                 Ok(rt) => rt
@@ -358,6 +368,7 @@ impl DhtNode {
             target,
             self.inner.config.keyword_result_cap,
             self.inner.config.search_phase2_fanout,
+            cancel,
         )
     }
 
@@ -366,6 +377,15 @@ impl DhtNode {
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
+    ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
+        self.search_sources_with_cancel(file_hash, file_size, CancellationToken::new())
+    }
+
+    pub fn search_sources_with_cancel(
+        &self,
+        file_hash: Ed2kHash,
+        file_size: u64,
+        cancel: CancellationToken,
     ) -> impl tokio_stream::Stream<Item = SourceResult> + Send + 'static {
         let target = NodeId::from_bytes(file_hash.0);
         let initial = {
@@ -389,6 +409,7 @@ impl DhtNode {
             file_size,
             self.inner.config.source_result_cap,
             self.inner.config.search_phase2_fanout,
+            cancel,
         )
     }
 
@@ -397,6 +418,15 @@ impl DhtNode {
         &self,
         file_hash: Ed2kHash,
         file_size: u64,
+    ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
+        self.search_notes_with_cancel(file_hash, file_size, CancellationToken::new())
+    }
+
+    pub fn search_notes_with_cancel(
+        &self,
+        file_hash: Ed2kHash,
+        file_size: u64,
+        cancel: CancellationToken,
     ) -> impl tokio_stream::Stream<Item = NoteResult> + Send + 'static {
         let target = NodeId::from_bytes(file_hash.0);
         let initial = {
@@ -420,6 +450,7 @@ impl DhtNode {
             file_size,
             self.inner.config.notes_result_cap,
             self.inner.config.search_phase2_fanout,
+            cancel,
         )
     }
 

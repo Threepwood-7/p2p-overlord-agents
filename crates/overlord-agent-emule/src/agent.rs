@@ -28,16 +28,18 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use overlord_agent_common::{
     AgentInterfacesView, ConfigUpdate, ContentType, CoordinatorClient, FileRecord, HashType, IndexerServer,
     IndexerService, IndexerStats, PopularHash, Protocol, RegisterRequest, ResultBatch,
-    RunningIndexerServer, SearchJob, SnoopEntry, Source, TagEntry,
+    RunningIndexerServer, SearchEvent, SearchEventStatus, SearchJob, SearchKind, SnoopEntry, Source,
+    TagEntry,
 };
 use overlord_kad_dht::{
-    DhtConfig, DhtNode, SearchResult,
+    DhtConfig, DhtNode, SearchResult, SourceResult,
     bootstrap::{BootstrapContact, encode_nodes_dat},
 };
 use overlord_kad_proto::{
@@ -76,6 +78,11 @@ struct ControlServerRuntime {
     server: RunningIndexerServer,
 }
 
+#[derive(Clone)]
+struct ActiveSearchHandle {
+    cancel: CancellationToken,
+}
+
 pub struct OverlordAgentEmule {
     config: Arc<RwLock<EmuleAgentConfig>>,
     coordinator: CoordinatorClient,
@@ -87,6 +94,7 @@ pub struct OverlordAgentEmule {
     control_server: Arc<Mutex<Option<ControlServerRuntime>>>,
     control_selection_state: Arc<RwLock<ResolvedInterfaceBindingReport>>,
     p2p_selection_state: Arc<RwLock<ResolvedInterfaceBindingReport>>,
+    active_searches: Arc<Mutex<HashMap<Uuid, ActiveSearchHandle>>>,
     restart_requested: Arc<AtomicBool>,
     restart_notify: Arc<Notify>,
     started: AtomicBool,
@@ -124,6 +132,7 @@ impl OverlordAgentEmule {
             control_server: Arc::new(Mutex::new(None)),
             control_selection_state: Arc::new(RwLock::new(control_selection_state)),
             p2p_selection_state: Arc::new(RwLock::new(p2p_selection_state)),
+            active_searches: Arc::new(Mutex::new(HashMap::new())),
             restart_requested: Arc::new(AtomicBool::new(false)),
             restart_notify: Arc::new(Notify::new()),
             started: AtomicBool::new(false),
@@ -540,6 +549,7 @@ impl OverlordAgentEmule {
     }
 
     async fn stop_runtime(&self) -> Result<()> {
+        self.cancel_active_searches().await;
         if let Some(runtime) = self.runtime.lock().await.take() {
             runtime.shutdown.store(true, Ordering::SeqCst);
             let tasks = {
@@ -552,6 +562,16 @@ impl OverlordAgentEmule {
             runtime.nat.stop().await?;
         }
         Ok(())
+    }
+
+    async fn cancel_active_searches(&self) {
+        let handles = {
+            let mut active = self.active_searches.lock().await;
+            active.drain().map(|(_, handle)| handle).collect::<Vec<_>>()
+        };
+        for handle in handles {
+            handle.cancel.cancel();
+        }
     }
 
     async fn build_runtime(
@@ -619,56 +639,175 @@ impl OverlordAgentEmule {
     }
 }
 
+#[derive(Default)]
+struct SearchRunStats {
+    result_count: u32,
+    batch_count: u32,
+}
+
+async fn emit_search_event(
+    callback_client: &CoordinatorClient,
+    job_id: Uuid,
+    indexer_id: Uuid,
+    status: SearchEventStatus,
+    stats: &SearchRunStats,
+    error: Option<String>,
+) -> Result<()> {
+    callback_client
+        .post_search_event(&SearchEvent {
+            job_id,
+            indexer_id,
+            status,
+            result_count: Some(stats.result_count),
+            batch_count: Some(stats.batch_count),
+            error,
+        })
+        .await
+}
+
+async fn post_search_batch(
+    callback_client: &CoordinatorClient,
+    job_id: Uuid,
+    indexer_id: Uuid,
+    files: Vec<FileRecord>,
+    stats: &mut SearchRunStats,
+) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    stats.result_count += files.len() as u32;
+    stats.batch_count += 1;
+    callback_client
+        .post_results(&ResultBatch {
+            job_id: Some(job_id),
+            indexer_id,
+            protocol: Protocol::Kad2,
+            files,
+        })
+        .await?;
+    emit_search_event(
+        callback_client,
+        job_id,
+        indexer_id,
+        SearchEventStatus::BatchReceived,
+        stats,
+        None,
+    )
+    .await
+}
+
+fn search_query(job: &SearchJob) -> Result<&str> {
+    job.query
+        .as_deref()
+        .filter(|query| !query.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("search job is missing query text"))
+}
+
+fn search_file_hash(job: &SearchJob) -> Result<Ed2kHash> {
+    let Some(HashType::Ed2k(value)) = job.file_hash.as_ref() else {
+        anyhow::bail!("search job is missing ed2k file hash");
+    };
+    Ed2kHash::from_str(value).with_context(|| format!("invalid Ed2k hash {value}"))
+}
+
+fn search_file_size(job: &SearchJob) -> Result<u64> {
+    job.file_size
+        .filter(|size| *size > 0)
+        .ok_or_else(|| anyhow::anyhow!("search job is missing file size"))
+}
+
+fn map_source_result(result: &SourceResult, file_size: u64) -> FileRecord {
+    FileRecord {
+        hashes: vec![HashType::Ed2k(result.file_hash.to_string())],
+        names: Vec::new(),
+        size: Some(file_size),
+        content_type: None,
+        tags: Vec::new(),
+        sources: vec![Source {
+            protocol: Protocol::Kad2,
+            address: format!("{}:{}", result.ip, result.tcp_port),
+            extra: serde_json::json!({
+                "udp_port": result.udp_port,
+                "search_mode": "source"
+            }),
+        }],
+    }
+}
+
 async fn do_active_keyword_search(
     dht: &DhtNode,
     indexer_id: Uuid,
     job: &SearchJob,
     config: Arc<RwLock<EmuleAgentConfig>>,
-) -> Result<()> {
-    let target = keyword_target(&job.query);
-    let mut stream = dht.search_keywords(target);
+    cancel: CancellationToken,
+) -> Result<SearchRunStats> {
+    let target = keyword_target(search_query(job)?);
+    let mut stream = dht.search_keywords_with_cancel(target, cancel.clone());
     let callback_client = CoordinatorClient::new(&job.callback_url)?;
     let mut files = Vec::new();
     let mut seen = 0usize;
+    let mut stats = SearchRunStats::default();
 
     while let Some(result) = stream.next().await {
         seen += 1;
         files.push(map_search_result_for(dht, &result)?);
         if files.len() >= ACTIVE_BATCH_SIZE {
-            callback_client
-                .post_results(&ResultBatch {
-                    job_id: Some(job.job_id),
-                    indexer_id,
-                    protocol: Protocol::Kad2,
-                    files: std::mem::take(&mut files),
-                })
-                .await?;
+            post_search_batch(
+                &callback_client,
+                job.job_id,
+                indexer_id,
+                std::mem::take(&mut files),
+                &mut stats,
+            )
+            .await?;
         }
     }
 
-    if !files.is_empty() {
-        callback_client
-            .post_results(&ResultBatch {
-                job_id: Some(job.job_id),
-                indexer_id,
-                protocol: Protocol::Kad2,
-                files,
-            })
-            .await?;
+    post_search_batch(&callback_client, job.job_id, indexer_id, files, &mut stats).await?;
+
+    if seen == 0 && !cancel.is_cancelled() && config.read().await.p2p.kad.enable_mock_results {
+        post_search_batch(
+            &callback_client,
+            job.job_id,
+            indexer_id,
+            vec![mock_file_record(search_query(job)?, dht.bind_addr()?.to_string())],
+            &mut stats,
+        )
+        .await?;
     }
 
-    if seen == 0 && config.read().await.p2p.kad.enable_mock_results {
-        callback_client
-            .post_results(&ResultBatch {
-                job_id: Some(job.job_id),
+    Ok(stats)
+}
+
+async fn do_active_source_search(
+    dht: &DhtNode,
+    indexer_id: Uuid,
+    job: &SearchJob,
+    cancel: CancellationToken,
+) -> Result<SearchRunStats> {
+    let file_hash = search_file_hash(job)?;
+    let file_size = search_file_size(job)?;
+    let callback_client = CoordinatorClient::new(&job.callback_url)?;
+    let mut stream = dht.search_sources_with_cancel(file_hash, file_size, cancel);
+    let mut files = Vec::new();
+    let mut stats = SearchRunStats::default();
+
+    while let Some(result) = stream.next().await {
+        files.push(map_source_result(&result, file_size));
+        if files.len() >= ACTIVE_BATCH_SIZE {
+            post_search_batch(
+                &callback_client,
+                job.job_id,
                 indexer_id,
-                protocol: Protocol::Kad2,
-                files: vec![mock_file_record(&job.query, dht.bind_addr()?.to_string())],
-            })
+                std::mem::take(&mut files),
+                &mut stats,
+            )
             .await?;
+        }
     }
 
-    Ok(())
+    post_search_batch(&callback_client, job.job_id, indexer_id, files, &mut stats).await?;
+    Ok(stats)
 }
 
 async fn seed_popular_impl(dht: &DhtNode, hashes: Vec<PopularHash>) -> Result<()> {
@@ -1350,11 +1489,88 @@ impl IndexerService for OverlordAgentEmule {
         let dht = runtime.dht.clone();
         let indexer_id = self.indexer_id;
         let config = self.config.clone();
-        tokio::spawn(async move {
-            if let Err(error) = do_active_keyword_search(&dht, indexer_id, &job, config).await {
-                warn!("active search failed: {error}");
+        let callback_client = self.coordinator.clone();
+        let active_searches = Arc::clone(&self.active_searches);
+        let cancel = CancellationToken::new();
+        {
+            let mut active = active_searches.lock().await;
+            if active.contains_key(&job.job_id) {
+                anyhow::bail!("search {} is already active", job.job_id);
             }
+            active.insert(
+                job.job_id,
+                ActiveSearchHandle {
+                    cancel: cancel.clone(),
+                },
+            );
+        }
+        tokio::spawn(async move {
+            let started_stats = SearchRunStats::default();
+            if let Err(error) = emit_search_event(
+                &callback_client,
+                job.job_id,
+                indexer_id,
+                SearchEventStatus::Started,
+                &started_stats,
+                None,
+            )
+            .await
+            {
+                warn!("failed to report search start: {error}");
+            }
+
+            let outcome = match job.kind {
+                SearchKind::Keyword => {
+                    do_active_keyword_search(&dht, indexer_id, &job, config, cancel.clone()).await
+                }
+                SearchKind::Source => {
+                    do_active_source_search(&dht, indexer_id, &job, cancel.clone()).await
+                }
+                SearchKind::Notes => Err(anyhow::anyhow!("notes search is not wired yet")),
+            };
+
+            let final_event = match outcome {
+                Ok(stats) if cancel.is_cancelled() => (
+                    SearchEventStatus::Cancelled,
+                    stats,
+                    None,
+                ),
+                Ok(stats) => (SearchEventStatus::Completed, stats, None),
+                Err(_error) if cancel.is_cancelled() => (
+                    SearchEventStatus::Cancelled,
+                    SearchRunStats::default(),
+                    None,
+                ),
+                Err(error) => (
+                    SearchEventStatus::Failed,
+                    SearchRunStats::default(),
+                    Some(error.to_string()),
+                ),
+            };
+
+            if let Err(error) = emit_search_event(
+                &callback_client,
+                job.job_id,
+                indexer_id,
+                final_event.0,
+                &final_event.1,
+                final_event.2,
+            )
+            .await
+            {
+                warn!("failed to report search completion: {error}");
+            }
+
+            active_searches.lock().await.remove(&job.job_id);
         });
+        Ok(())
+    }
+
+    async fn cancel_search(&self, job_id: Uuid) -> Result<()> {
+        let Some(handle) = self.active_searches.lock().await.get(&job_id).cloned() else {
+            anyhow::bail!("search {job_id} is not active");
+        };
+        handle.cancel.cancel();
         Ok(())
     }
 

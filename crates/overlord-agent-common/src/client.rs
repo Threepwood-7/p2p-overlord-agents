@@ -3,7 +3,8 @@ use reqwest::Url;
 
 use crate::types::{
     AgentInterfacesView, AgentNetworkReport, ConfigUpdate, IndexerRegistration, IndexerStats, PopularHash,
-    RegisterRequest, RegistrationResponse, ResultBatch, SearchJob, SnoopEntry,
+    RegisterRequest, RegistrationResponse, ResultBatch, SearchCancelRequest, SearchEvent, SearchJob,
+    SearchKind, SnoopEntry,
 };
 
 #[derive(Clone)]
@@ -46,11 +47,40 @@ impl CoordinatorClient {
         Ok(())
     }
 
-    pub async fn dispatch_search(&self, job: &SearchJob) -> Result<()> {
-        let url = self.base_url.join("/api/search")?;
+    pub async fn post_search_event(&self, event: &SearchEvent) -> Result<()> {
+        let url = self.base_url.join("/api/internal/search-events")?;
         self.http
             .post(url)
-            .json(job)
+            .json(event)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn dispatch_search(&self, job: &SearchJob) -> Result<()> {
+        let url = self.base_url.join("/api/search")?;
+        if job.kind != SearchKind::Keyword {
+            anyhow::bail!("only keyword searches can be dispatched through the public coordinator api");
+        }
+        self.http
+            .post(url)
+            .json(&serde_json::json!({
+                "protocol": "kad2",
+                "kind": "keyword",
+                "query": job.query,
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn cancel_internal_search(&self, payload: &SearchCancelRequest) -> Result<()> {
+        let url = self.base_url.join("/api/internal/search/cancel")?;
+        self.http
+            .post(url)
+            .json(payload)
             .send()
             .await?
             .error_for_status()?;

@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::{
     service::IndexerService,
-    types::{ConfigUpdate, PopularHash, SearchJob},
+    types::{ConfigUpdate, PopularHash, SearchCancelRequest, SearchJob},
 };
 
 struct AppState<S>
@@ -65,6 +65,7 @@ where
             .route("/api/internal/stats", get(get_stats::<S>))
             .route("/api/internal/interfaces", get(get_interfaces::<S>))
             .route("/api/internal/search", post(post_search::<S>))
+            .route("/api/internal/search/cancel", post(post_cancel_search::<S>))
             .route("/api/internal/enrich", post(post_enrich::<S>))
             .route("/api/internal/seed-popular", post(post_seed_popular::<S>))
             .route("/api/internal/config-update", post(post_config_update::<S>))
@@ -180,6 +181,23 @@ where
     }
 }
 
+async fn post_cancel_search<S>(
+    State(state): State<AppState<S>>,
+    Json(payload): Json<SearchCancelRequest>,
+) -> impl IntoResponse
+where
+    S: IndexerService,
+{
+    match state.service.cancel_search(payload.job_id).await {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 async fn post_enrich<S>(
     State(state): State<AppState<S>>,
     Json(payload): Json<Value>,
@@ -234,7 +252,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgentNetworkReport, ConfigUpdate, IndexerStats, Protocol, SearchJob};
+    use crate::types::{AgentNetworkReport, ConfigUpdate, IndexerStats, Protocol, SearchJob, SearchKind};
     use anyhow::Result;
     use async_trait::async_trait;
     use tokio::{
@@ -270,6 +288,10 @@ mod tests {
         }
 
         async fn search(&self, _job: SearchJob) -> Result<()> {
+            Ok(())
+        }
+
+        async fn cancel_search(&self, _job_id: Uuid) -> Result<()> {
             Ok(())
         }
 
@@ -328,5 +350,34 @@ mod tests {
             .unwrap();
 
         let _ = socket.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+    }
+
+    #[tokio::test]
+    async fn accepts_typed_search_payloads() {
+        let server = IndexerServer::new(Arc::new(FakeService {
+            indexer_id: Uuid::new_v4(),
+        }))
+        .spawn("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("http://{}/api/internal/search", server.local_addr()))
+            .json(&serde_json::json!({
+                "job_id": Uuid::new_v4(),
+                "kind": SearchKind::Keyword,
+                "query": "test file",
+                "file_hash": null,
+                "file_size": null,
+                "callback_url": "http://127.0.0.1:13300"
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        server.shutdown().await.unwrap();
     }
 }
