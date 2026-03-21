@@ -49,6 +49,7 @@ use overlord_kad_proto::{
 use overlord_kad_routing::Contact;
 
 use crate::config::EmuleAgentConfig;
+use crate::snoop_queue::SnoopQueue;
 
 const ACTIVE_BATCH_SIZE: usize = 25;
 const PASSIVE_BATCH_SIZE: usize = 50;
@@ -89,7 +90,7 @@ pub struct OverlordAgentEmule {
     indexer_id: Uuid,
     started_at: Instant,
     state_paths: AgentStatePaths,
-    snoop_queue: Arc<Mutex<HashMap<String, SnoopEntry>>>,
+    snoop_queue: Arc<Mutex<SnoopQueue>>,
     runtime: Arc<Mutex<Option<AgentNetworkRuntime>>>,
     control_server: Arc<Mutex<Option<ControlServerRuntime>>>,
     control_selection_state: Arc<RwLock<ResolvedInterfaceBindingReport>>,
@@ -120,6 +121,7 @@ impl OverlordAgentEmule {
             Self::resolve_control_selection_state(&config, &interfaces, None, false, false);
         let p2p_selection_state =
             Self::resolve_p2p_selection_state(&config, &interfaces, None, false, false);
+        let snoop_queue_config = config.p2p.snoop_queue.clone();
 
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
@@ -127,7 +129,7 @@ impl OverlordAgentEmule {
             indexer_id,
             started_at: Instant::now(),
             state_paths,
-            snoop_queue: Arc::new(Mutex::new(HashMap::new())),
+            snoop_queue: Arc::new(Mutex::new(SnoopQueue::new(snoop_queue_config))),
             runtime: Arc::new(Mutex::new(None)),
             control_server: Arc::new(Mutex::new(None)),
             control_selection_state: Arc::new(RwLock::new(control_selection_state)),
@@ -867,10 +869,13 @@ async fn seed_popular_impl(dht: &DhtNode, hashes: Vec<PopularHash>) -> Result<()
 async fn restore_snoop_queue(
     coordinator: &CoordinatorClient,
     indexer_id: Uuid,
-    snoop_queue: &Arc<Mutex<HashMap<String, SnoopEntry>>>,
+    snoop_queue: &Arc<Mutex<SnoopQueue>>,
 ) {
     match coordinator.restore_snoop(indexer_id).await {
-        Ok(entries) => merge_snoop_entries(snoop_queue, entries).await,
+        Ok(entries) => {
+            let mut queue = snoop_queue.lock().await;
+            queue.merge_snapshot(entries);
+        }
         Err(error) => warn!("failed to restore snoop queue: {error}"),
     }
 }
@@ -878,12 +883,9 @@ async fn restore_snoop_queue(
 async fn flush_snoop_queue(
     coordinator: &CoordinatorClient,
     indexer_id: Uuid,
-    snoop_queue: &Arc<Mutex<HashMap<String, SnoopEntry>>>,
+    snoop_queue: &Arc<Mutex<SnoopQueue>>,
 ) -> Result<()> {
-    let entries = {
-        let queue = snoop_queue.lock().await;
-        queue.values().cloned().collect::<Vec<_>>()
-    };
+    let entries = { snoop_queue.lock().await.snapshot() };
     coordinator.flush_snoop(indexer_id, &entries).await
 }
 
@@ -1088,56 +1090,20 @@ fn map_search_result_for(dht: &DhtNode, result: &SearchResult) -> Result<FileRec
     })
 }
 
-async fn merge_snoop_entries(
-    snoop_queue: &Arc<Mutex<HashMap<String, SnoopEntry>>>,
-    entries: Vec<SnoopEntry>,
-) {
-    let mut queue = snoop_queue.lock().await;
-    for entry in entries {
-        merge_snoop_entry(&mut queue, entry);
-    }
-}
-
-fn merge_snoop_entry(queue: &mut HashMap<String, SnoopEntry>, entry: SnoopEntry) {
-    queue
-        .entry(entry.query.clone())
-        .and_modify(|existing| {
-            existing.hit_count = existing.hit_count.saturating_add(entry.hit_count);
-            existing.last_seen = existing.last_seen.max(entry.last_seen);
-            existing.first_seen = existing.first_seen.min(entry.first_seen);
-            if existing.hash.is_none() {
-                existing.hash = entry.hash.clone();
-            }
-        })
-        .or_insert(entry);
-}
-
 async fn record_snoop_entry(
-    snoop_queue: &Arc<Mutex<HashMap<String, SnoopEntry>>>,
+    snoop_queue: &Arc<Mutex<SnoopQueue>>,
     query: String,
     hash: Option<HashType>,
 ) {
-    let now = Utc::now();
-    let entry = SnoopEntry {
-        query,
-        hash,
-        hit_count: 1,
-        first_seen: now,
-        last_seen: now,
-    };
     let mut queue = snoop_queue.lock().await;
-    merge_snoop_entry(&mut queue, entry);
+    queue.record(query, hash, Utc::now());
 }
 
-async fn next_passive_keyword_target(
-    snoop_queue: &Arc<Mutex<HashMap<String, SnoopEntry>>>,
-) -> Option<NodeId> {
-    let queue = snoop_queue.lock().await;
-    queue
-        .values()
-        .filter_map(|entry| entry.query.strip_prefix("keyword:"))
-        .filter_map(|raw| NodeId::from_str(raw).ok())
-        .next()
+async fn next_passive_keyword_target(snoop_queue: &Arc<Mutex<SnoopQueue>>) -> Option<NodeId> {
+    snoop_queue
+        .lock()
+        .await
+        .select_next_keyword_target(Utc::now())
 }
 
 async fn persist_nodes_dat_for(dht: &DhtNode, state_paths: &AgentStatePaths) -> Result<()> {
@@ -1161,7 +1127,7 @@ async fn persist_nodes_dat_for(dht: &DhtNode, state_paths: &AgentStatePaths) -> 
 
 async fn handle_unsolicited_packet(
     dht: &DhtNode,
-    snoop_queue: &Arc<Mutex<HashMap<String, SnoopEntry>>>,
+    snoop_queue: &Arc<Mutex<SnoopQueue>>,
     packet: KadPacket,
     from: SocketAddr,
 ) -> Result<()> {
@@ -1647,8 +1613,7 @@ impl IndexerService for OverlordAgentEmule {
     }
 
     async fn flush_snoop(&self) -> Result<Vec<SnoopEntry>> {
-        let queue = self.snoop_queue.lock().await;
-        Ok(queue.values().cloned().collect())
+        Ok(self.snoop_queue.lock().await.snapshot())
     }
 
     async fn interfaces(&self) -> Result<AgentNetworkReport> {

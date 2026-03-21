@@ -47,6 +47,7 @@ pub struct P2pConfig {
     pub selection_confirmed: bool,
     pub kad: KadConfig,
     pub ed2k: Ed2kConfig,
+    pub snoop_queue: SnoopQueueConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +72,14 @@ pub struct KadConfig {
 #[serde(default)]
 pub struct Ed2kConfig {
     pub listen_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SnoopQueueConfig {
+    pub dedup_window_secs: u64,
+    pub max_queries_per_600s: u32,
+    pub drain_cooldown_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -153,6 +162,16 @@ impl Default for Ed2kConfig {
     fn default() -> Self {
         Self {
             listen_port: 41_001,
+        }
+    }
+}
+
+impl Default for SnoopQueueConfig {
+    fn default() -> Self {
+        Self {
+            dedup_window_secs: 28_800,
+            max_queries_per_600s: 8,
+            drain_cooldown_secs: 3_600,
         }
     }
 }

@@ -135,6 +135,7 @@ pub struct SnoopEntry {
     pub hit_count: u32,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
+    pub last_drained_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
