@@ -40,8 +40,8 @@ pub struct MappingSpec {
 pub struct SelectedGateway {
     pub backend: String,
     pub control_url: String,
-    pub local_addr: Option<String>,
-    pub gateway_addr: Option<String>,
+    pub local_ip: Option<String>,
+    pub gateway_ip: Option<String>,
     pub external_ip: Option<String>,
 }
 

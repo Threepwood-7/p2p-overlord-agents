@@ -247,8 +247,8 @@ impl GatewayHandle {
         crate::types::SelectedGateway {
             backend: UPNP_RUPNP_BACKEND.to_string(),
             control_url: self.device.url().to_string(),
-            local_addr: None,
-            gateway_addr: self.device.url().host().map(ToString::to_string),
+            local_ip: None,
+            gateway_ip: self.device.url().host().map(ToString::to_string),
             external_ip,
         }
     }
