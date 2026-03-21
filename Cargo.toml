@@ -3,6 +3,7 @@ members = [
     "crates/overlord-agent-common",
     "crates/overlord-agent-nat",
     "crates/overlord-agent-emule",
+    "crates/overlord-tools",
     "crates/overlord-kad-proto",
     "crates/overlord-kad-routing",
     "crates/overlord-kad-net",
@@ -22,6 +23,7 @@ axum = { version = "0.8", features = ["macros"] }
 binrw = "0.14"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
