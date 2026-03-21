@@ -166,11 +166,11 @@ fn default_backend_arg() -> String {
 
 fn apply_ssdp_bind_override(ssdp_bind_ip: Option<&str>) {
     if let Some(ip) = ssdp_bind_ip {
-        let bind_addr = format!("{ip}:0");
+        let ssdp_bind_addr = format!("{ip}:0");
         unsafe {
-            std::env::set_var("SSDP_CLIENT_BIND_ADDR", &bind_addr);
+            std::env::set_var("SSDP_CLIENT_BIND_ADDR", &ssdp_bind_addr);
         }
-        info!("set SSDP_CLIENT_BIND_ADDR={bind_addr}");
+        info!("set SSDP_CLIENT_BIND_ADDR={ssdp_bind_addr}");
     }
 }
 
