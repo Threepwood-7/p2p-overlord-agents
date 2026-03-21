@@ -41,13 +41,9 @@ pub enum DeviceSearchTarget {
 impl DeviceSearchTarget {
     fn as_str(&self) -> &str {
         match self {
-            Self::InternetGatewayDeviceV2 => {
-                "urn:schemas-upnp-org:device:InternetGatewayDevice:2"
-            }
+            Self::InternetGatewayDeviceV2 => "urn:schemas-upnp-org:device:InternetGatewayDevice:2",
             Self::WanIpConnectionV2 => "urn:schemas-upnp-org:service:WANIPConnection:2",
-            Self::InternetGatewayDeviceV1 => {
-                "urn:schemas-upnp-org:device:InternetGatewayDevice:1"
-            }
+            Self::InternetGatewayDeviceV1 => "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
             Self::WanIpConnectionV1 => "urn:schemas-upnp-org:service:WANIPConnection:1",
             Self::WanPppConnectionV1 => "urn:schemas-upnp-org:service:WANPPPConnection:1",
             Self::RootDevice => "upnp:rootdevice",
@@ -298,10 +294,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<(DiscoveryResult, Option<G
     };
 
     if raw_devlist.is_null() && error != sys::UPNPDISCOVER_SUCCESS {
-        bail!(
-            "miniupnpc discovery failed: {}",
-            upnp_error_string(error)
-        );
+        bail!("miniupnpc discovery failed: {}", upnp_error_string(error));
     }
 
     let devlist = UpnpDevList(raw_devlist);
@@ -400,10 +393,10 @@ fn build_gateway(
     local_ip: Option<String>,
     external_ip: Option<String>,
 ) -> Result<Gateway> {
-    let root_description_url =
-        pointer_to_string(urls.rootdescURL).ok_or_else(|| anyhow!("miniupnpc did not provide rootdescURL"))?;
-    let control_url =
-        pointer_to_string(urls.controlURL).ok_or_else(|| anyhow!("miniupnpc did not provide controlURL"))?;
+    let root_description_url = pointer_to_string(urls.rootdescURL)
+        .ok_or_else(|| anyhow!("miniupnpc did not provide rootdescURL"))?;
+    let control_url = pointer_to_string(urls.controlURL)
+        .ok_or_else(|| anyhow!("miniupnpc did not provide controlURL"))?;
     let service_type = service_type_from_data(&data)
         .ok_or_else(|| anyhow!("miniupnpc did not provide a usable service type"))?;
     let summary = GatewaySummary {
@@ -448,7 +441,11 @@ fn external_ip_from_raw(urls: &sys::UPNPUrls, data: &sys::IGDdatas) -> Result<Op
     };
     let mut buffer = [0 as c_char; EXTERNAL_IP_CAPACITY];
     let status = unsafe {
-        sys::UPNP_GetExternalIPAddress(control_url.as_ptr(), service_type.as_ptr(), buffer.as_mut_ptr())
+        sys::UPNP_GetExternalIPAddress(
+            control_url.as_ptr(),
+            service_type.as_ptr(),
+            buffer.as_mut_ptr(),
+        )
     };
     if status == sys::UPNPCOMMAND_SUCCESS {
         return Ok(buffer_to_string(&buffer));
@@ -488,7 +485,10 @@ fn build_device_type_list(search_targets: &[DeviceSearchTarget]) -> Result<Devic
             .map(|target| c_string(target.as_str(), "search_target"))
             .collect::<Result<Vec<_>>>()?
     };
-    let mut pointers = values.iter().map(|value| value.as_ptr()).collect::<Vec<_>>();
+    let mut pointers = values
+        .iter()
+        .map(|value| value.as_ptr())
+        .collect::<Vec<_>>();
     pointers.push(ptr::null());
     Ok(DeviceTypeList {
         _values: values,
@@ -502,7 +502,7 @@ fn minissdpd_socket_cstring(path: Option<&PathBuf>) -> Result<Option<CString>> {
         if path.is_some() {
             bail!("minissdpd is not supported on Windows for miniupnpc discovery");
         }
-        return Ok(None);
+        Ok(None)
     }
 
     #[cfg(not(windows))]
@@ -530,22 +530,33 @@ fn pointer_to_string(pointer: *const c_char) -> Option<String> {
     if pointer.is_null() {
         return None;
     }
-    let value = unsafe { CStr::from_ptr(pointer) }.to_string_lossy().trim().to_string();
+    let value = unsafe { CStr::from_ptr(pointer) }
+        .to_string_lossy()
+        .trim()
+        .to_string();
     (!value.is_empty()).then_some(value)
 }
 
 fn buffer_to_string(buffer: &[c_char]) -> Option<String> {
-    let nul = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+    let nul = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
     if nul == 0 {
         return None;
     }
-    let bytes = buffer[..nul].iter().map(|byte| *byte as u8).collect::<Vec<_>>();
+    let bytes = buffer[..nul]
+        .iter()
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
     let value = String::from_utf8_lossy(&bytes).trim().to_string();
     (!value.is_empty()).then_some(value)
 }
 
 fn host_from_url(url: &str) -> Option<String> {
-    let authority = url.split_once("://").map_or(url, |(_, remainder)| remainder);
+    let authority = url
+        .split_once("://")
+        .map_or(url, |(_, remainder)| remainder);
     let authority = authority.split('/').next()?;
     if authority.starts_with('[') {
         return authority
@@ -632,7 +643,9 @@ impl Drop for UpnpDevList {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceSearchTarget, GatewayStatus, buffer_to_string, default_search_targets, host_from_url};
+    use super::{
+        DeviceSearchTarget, GatewayStatus, buffer_to_string, default_search_targets, host_from_url,
+    };
 
     #[test]
     fn default_search_targets_include_igd_and_rootdevice() {
@@ -642,9 +655,13 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(targets.contains(&DeviceSearchTarget::RootDevice.as_str().to_string()));
-        assert!(targets.contains(
-            &DeviceSearchTarget::InternetGatewayDeviceV1.as_str().to_string()
-        ));
+        assert!(
+            targets.contains(
+                &DeviceSearchTarget::InternetGatewayDeviceV1
+                    .as_str()
+                    .to_string()
+            )
+        );
     }
 
     #[test]

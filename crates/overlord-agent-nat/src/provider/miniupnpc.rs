@@ -48,9 +48,10 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
         let config = config.clone();
         let status_config = config.clone();
         let mappings = mappings.to_vec();
-        let outcome = task::spawn_blocking(move || reconcile_blocking(&backend_name, &config, &mappings))
-            .await
-            .context("miniupnpc reconcile task failed")??;
+        let outcome =
+            task::spawn_blocking(move || reconcile_blocking(&backend_name, &config, &mappings))
+                .await
+                .context("miniupnpc reconcile task failed")??;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -163,7 +164,10 @@ fn reconcile_blocking(
 fn release_blocking(config: &NatConfig, mappings: &[MappedEndpoint]) -> Result<()> {
     let gateway = discover_gateway(config)?;
     for mapping in mappings {
-        let _ = gateway.delete_port_mapping(mapping.external_addr.port(), mapping.protocol.as_upnp_token());
+        let _ = gateway.delete_port_mapping(
+            mapping.external_addr.port(),
+            mapping.protocol.as_upnp_token(),
+        );
     }
     Ok(())
 }
@@ -219,30 +223,36 @@ fn candidate_root_description_urls(igd_ip: &str) -> [String; 4] {
 }
 
 fn gateway_local_ip(config: &NatConfig, gateway: &Gateway) -> Result<Ipv4Addr> {
-    if let Some(bind_ip) = config.bind_ip.as_deref() {
-        if let Ok(IpAddr::V4(ip)) = bind_ip.parse::<IpAddr>() {
-            return Ok(ip);
-        }
+    if let Some(bind_ip) = config.bind_ip.as_deref()
+        && let Ok(IpAddr::V4(ip)) = bind_ip.parse::<IpAddr>()
+    {
+        return Ok(ip);
     }
-    if let Some(local_ip) = gateway.local_ip() {
-        if let Ok(IpAddr::V4(ip)) = local_ip.parse::<IpAddr>() {
-            return Ok(ip);
-        }
+    if let Some(local_ip) = gateway.local_ip()
+        && let Ok(IpAddr::V4(ip)) = local_ip.parse::<IpAddr>()
+    {
+        return Ok(ip);
     }
-    Err(anyhow!("miniupnpc did not provide a usable IPv4 LAN address"))
+    Err(anyhow!(
+        "miniupnpc did not provide a usable IPv4 LAN address"
+    ))
 }
 
-fn mapping_internal_ip(config: &NatConfig, spec: &MappingSpec, gateway_local_ip: &Ipv4Addr) -> Ipv4Addr {
+fn mapping_internal_ip(
+    config: &NatConfig,
+    spec: &MappingSpec,
+    gateway_local_ip: &Ipv4Addr,
+) -> Ipv4Addr {
     if !spec.local_addr.ip().is_unspecified() {
         return match spec.local_addr.ip() {
             IpAddr::V4(ip) => ip,
             IpAddr::V6(_) => Ipv4Addr::LOCALHOST,
         };
     }
-    if let Some(bind_ip) = config.bind_ip.as_deref() {
-        if let Ok(IpAddr::V4(ip)) = bind_ip.parse::<IpAddr>() {
-            return ip;
-        }
+    if let Some(bind_ip) = config.bind_ip.as_deref()
+        && let Ok(IpAddr::V4(ip)) = bind_ip.parse::<IpAddr>()
+    {
+        return ip;
     }
     *gateway_local_ip
 }

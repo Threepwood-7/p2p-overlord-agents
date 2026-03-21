@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use overlord_agent_nat::default_upnp_backend_order;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct EmuleAgentConfig {
     pub coordinator: CoordinatorConfig,
@@ -39,7 +39,7 @@ pub struct ControlConfig {
     pub listen_port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct P2pConfig {
     pub bind_iface: Option<String>,
@@ -73,7 +73,7 @@ pub struct Ed2kConfig {
     pub listen_port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct NatConfig {
     pub p2p: NatP2pConfig,
@@ -97,19 +97,6 @@ pub struct NatP2pConfig {
 #[serde(default)]
 pub struct LogConfig {
     pub level: String,
-}
-
-impl Default for EmuleAgentConfig {
-    fn default() -> Self {
-        Self {
-            coordinator: CoordinatorConfig::default(),
-            agent: AgentConfig::default(),
-            control: ControlConfig::default(),
-            p2p: P2pConfig::default(),
-            nat: NatConfig::default(),
-            log: LogConfig::default(),
-        }
-    }
 }
 
 impl Default for CoordinatorConfig {
@@ -142,18 +129,6 @@ impl Default for ControlConfig {
     }
 }
 
-impl Default for P2pConfig {
-    fn default() -> Self {
-        Self {
-            bind_iface: None,
-            bind_ip: None,
-            selection_confirmed: false,
-            kad: KadConfig::default(),
-            ed2k: Ed2kConfig::default(),
-        }
-    }
-}
-
 impl Default for KadConfig {
     fn default() -> Self {
         Self {
@@ -178,14 +153,6 @@ impl Default for Ed2kConfig {
     fn default() -> Self {
         Self {
             listen_port: 41_001,
-        }
-    }
-}
-
-impl Default for NatConfig {
-    fn default() -> Self {
-        Self {
-            p2p: NatP2pConfig::default(),
         }
     }
 }

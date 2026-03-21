@@ -69,6 +69,18 @@ pub struct TraversalResult {
     pub search_entries: Vec<(Ed2kHash, Vec<overlord_kad_proto::Tag>)>,
 }
 
+/// Immutable inputs for the traversal phase-2 search pass.
+struct SearchPhaseConfig<'a> {
+    responded: &'a [TraversalContact],
+    kind: TraversalKind,
+    target: NodeId,
+    query_timeout: Duration,
+    deadline: Instant,
+    phase2_fanout: usize,
+    cancel: &'a CancellationToken,
+    result_tx: Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+}
+
 pub async fn run_traversal(
     rpc: &RpcManager,
     initial_candidates: Vec<TraversalContact>,
@@ -287,14 +299,16 @@ pub async fn run_traversal(
         kind => {
             run_search_phase(
                 rpc,
-                &responded,
-                kind,
-                target,
-                query_timeout,
-                deadline,
-                phase2_fanout,
-                &cancel,
-                result_tx,
+                SearchPhaseConfig {
+                    responded: &responded,
+                    kind,
+                    target,
+                    query_timeout,
+                    deadline,
+                    phase2_fanout,
+                    cancel: &cancel,
+                    result_tx,
+                },
             )
             .await
         }
@@ -309,15 +323,18 @@ pub async fn run_traversal(
 /// Send search packets to the selected responding nodes and collect results.
 async fn run_search_phase(
     rpc: &RpcManager,
-    responded: &[TraversalContact],
-    kind: TraversalKind,
-    target: NodeId,
-    query_timeout: Duration,
-    deadline: Instant,
-    phase2_fanout: usize,
-    cancel: &CancellationToken,
-    result_tx: Option<mpsc::Sender<(Ed2kHash, Vec<Tag>)>>,
+    config: SearchPhaseConfig<'_>,
 ) -> Vec<(Ed2kHash, Vec<overlord_kad_proto::Tag>)> {
+    let SearchPhaseConfig {
+        responded,
+        kind,
+        target,
+        query_timeout,
+        deadline,
+        phase2_fanout,
+        cancel,
+        result_tx,
+    } = config;
     if cancel.is_cancelled() {
         return vec![];
     }
@@ -441,11 +458,11 @@ async fn run_search_phase(
     search_entries
 }
 
-fn select_phase2_contacts<'a>(
-    responded: &'a [TraversalContact],
+fn select_phase2_contacts(
+    responded: &[TraversalContact],
     target: NodeId,
     phase2_fanout: usize,
-) -> Vec<&'a TraversalContact> {
+) -> Vec<&TraversalContact> {
     // Harvest-first repo policy: keep the eMule SEARCHTOLERANCE gate, but do
     // not stop at the closest-K responders. This indexer asks a broader set of
     // tolerated responders so it can collect more SEARCH_RES packets.
@@ -541,7 +558,7 @@ mod tests {
     #[test]
     fn test_candidate_sorting() {
         let target = NodeId::ZERO;
-        let mut candidates = vec![
+        let mut candidates = [
             TraversalCandidate {
                 contact: TraversalContact {
                     id: NodeId::from_bytes([0xFF; 16]),
@@ -724,14 +741,16 @@ mod tests {
 
         let search_entries = run_search_phase(
             &rpc,
-            &[contact],
-            TraversalKind::Keyword { start_position: 0 },
-            target,
-            Duration::from_millis(100),
-            Instant::now() + Duration::from_millis(300),
-            10,
-            &CancellationToken::new(),
-            Some(result_tx),
+            SearchPhaseConfig {
+                responded: &[contact],
+                kind: TraversalKind::Keyword { start_position: 0 },
+                target,
+                query_timeout: Duration::from_millis(100),
+                deadline: Instant::now() + Duration::from_millis(300),
+                phase2_fanout: 10,
+                cancel: &CancellationToken::new(),
+                result_tx: Some(result_tx),
+            },
         )
         .await;
 

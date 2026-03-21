@@ -206,7 +206,7 @@ impl Tag {
             0x06 => {
                 // BOOLARRAY: u16 len + skip bytes => store as Blob
                 let arr_len: u16 = reader.read_type(endian)?;
-                let byte_count = ((arr_len as usize) + 7) / 8;
+                let byte_count = (arr_len as usize).div_ceil(8);
                 let mut data = vec![0u8; byte_count];
                 reader
                     .read_exact(&mut data)
@@ -279,7 +279,7 @@ impl BinWrite for Tag {
                 let bytes = s.as_bytes();
                 let len = bytes.len() as u16;
                 writer.write_type(&len, endian)?;
-                writer.write_all(bytes).map_err(|e| binrw::Error::Io(e))?;
+                writer.write_all(bytes).map_err(binrw::Error::Io)?;
             }
         }
 
@@ -291,7 +291,7 @@ impl BinWrite for Tag {
                 let bytes = s.as_bytes();
                 let len = bytes.len() as u16;
                 writer.write_type(&len, endian)?;
-                writer.write_all(bytes).map_err(|e| binrw::Error::Io(e))?;
+                writer.write_all(bytes).map_err(binrw::Error::Io)?;
             }
             TagValue::U32(v) => {
                 writer.write_type(v, endian)?;
@@ -306,7 +306,7 @@ impl BinWrite for Tag {
             TagValue::Blob(data) => {
                 let len = data.len() as u32;
                 writer.write_type(&len, endian)?;
-                writer.write_all(data).map_err(|e| binrw::Error::Io(e))?;
+                writer.write_all(data).map_err(binrw::Error::Io)?;
             }
             TagValue::U16(v) => {
                 writer.write_type(v, endian)?;
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_float_value() {
-        let t = Tag::new_short(0x10, TagValue::Float(3.14));
+        let t = Tag::new_short(0x10, TagValue::Float(std::f32::consts::PI));
         let t2 = roundtrip(&t);
         // Float comparison needs tolerance
         if let (TagValue::Float(a), TagValue::Float(b)) = (&t.value, &t2.value) {

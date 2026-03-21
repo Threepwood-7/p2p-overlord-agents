@@ -74,7 +74,7 @@ pub struct NatStatusSnapshot {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct NatStatus {
     pub enabled: bool,
     pub gateway_discovered: bool,
@@ -89,26 +89,6 @@ pub struct NatStatus {
     pub observed_external_addresses: Vec<String>,
     pub last_refresh_unix_secs: Option<u64>,
     pub last_error: Option<String>,
-}
-
-impl Default for NatStatus {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            gateway_discovered: false,
-            backend: None,
-            bind_ip: None,
-            igd_ip: None,
-            minissdpd_socket: None,
-            ssdp_local_port: None,
-            external_ip_override: None,
-            gateway: None,
-            mappings: Vec::new(),
-            observed_external_addresses: Vec::new(),
-            last_refresh_unix_secs: None,
-            last_error: None,
-        }
-    }
 }
 
 impl NatStatus {

@@ -49,11 +49,11 @@ impl SearchResult {
             }
         }
 
-        if size.is_none() {
-            if let Some(low) = size_low {
-                let high = size_high.unwrap_or(0);
-                size = Some(((high as u64) << 32) | low as u64);
-            }
+        if size.is_none()
+            && let Some(low) = size_low
+        {
+            let high = size_high.unwrap_or(0);
+            size = Some(((high as u64) << 32) | low as u64);
         }
 
         SearchResult {

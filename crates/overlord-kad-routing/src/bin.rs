@@ -98,10 +98,10 @@ impl RoutingBin {
 
     /// Move a contact to the back (most recently used).
     pub fn refresh(&mut self, id: &NodeId) {
-        if let Some(pos) = self.contacts.iter().position(|c| &c.id == id) {
-            if let Some(c) = self.contacts.remove(pos) {
-                self.contacts.push_back(c);
-            }
+        if let Some(pos) = self.contacts.iter().position(|c| &c.id == id)
+            && let Some(c) = self.contacts.remove(pos)
+        {
+            self.contacts.push_back(c);
         }
     }
 

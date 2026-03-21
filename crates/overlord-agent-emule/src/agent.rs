@@ -260,14 +260,14 @@ impl OverlordAgentEmule {
     fn startup_control_bind_addr(config: &EmuleAgentConfig) -> Result<SocketAddr> {
         let interfaces = detect_interfaces().unwrap_or_default();
         let selection = Self::control_selection(config);
-        if selection.selection_confirmed {
-            if let Some(bind_ip) = resolve_bind_ip(
+        if selection.selection_confirmed
+            && let Some(bind_ip) = resolve_bind_ip(
                 &interfaces,
                 selection.bind_iface.as_deref(),
                 selection.bind_ip.as_deref(),
-            ) {
-                return Self::selected_control_bind_addr(config, Some(&bind_ip));
-            }
+            )
+        {
+            return Self::selected_control_bind_addr(config, Some(&bind_ip));
         }
 
         Self::bootstrap_control_bind_addr(config)
@@ -919,8 +919,8 @@ fn load_or_create_indexer_id(path: &str) -> Result<Uuid> {
     if path.exists() {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        return Ok(Uuid::parse_str(contents.trim())
-            .with_context(|| format!("invalid uuid in {}", path.display()))?);
+        return Uuid::parse_str(contents.trim())
+            .with_context(|| format!("invalid uuid in {}", path.display()));
     }
 
     if let Some(parent) = path.parent() {
@@ -1317,56 +1317,6 @@ fn contact_to_entry(contact: Contact) -> ContactEntry {
         udp_port: contact.udp_port,
         tcp_port: contact.tcp_port,
         version: contact.kad_version,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        EmuleAgentConfig, apply_networking_config, empty_networking_config, keyword_target,
-        significant_keyword_words,
-    };
-    use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
-
-    #[test]
-    fn significant_words_ignore_short_tokens() {
-        assert_eq!(
-            significant_keyword_words("A torino x train"),
-            vec!["torino".to_string(), "train".to_string()]
-        );
-    }
-
-    #[test]
-    fn keyword_target_is_stable() {
-        assert_eq!(
-            hex::encode(keyword_target("Torino Train").0),
-            "b2bc3aa39f375069e7c27eb83ce6baf3"
-        );
-    }
-
-    #[test]
-    fn empty_networking_config_prefers_miniupnpc_then_rupnp() {
-        assert_eq!(
-            empty_networking_config().nat.p2p.backend_order,
-            vec![
-                UPNP_MINIUPNPC_BACKEND.to_string(),
-                UPNP_RUPNP_BACKEND.to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn apply_networking_config_preserves_explicit_backend_order() {
-        let mut config = EmuleAgentConfig::default();
-        let mut desired = empty_networking_config();
-        desired.nat.p2p.backend_order = vec![UPNP_RUPNP_BACKEND.to_string()];
-
-        apply_networking_config(&mut config, &desired);
-
-        assert_eq!(
-            config.nat.p2p.backend_order,
-            vec![UPNP_RUPNP_BACKEND.to_string()]
-        );
     }
 }
 
@@ -1837,5 +1787,55 @@ impl OverlordAgentEmule {
                 }
             }
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EmuleAgentConfig, apply_networking_config, empty_networking_config, keyword_target,
+        significant_keyword_words,
+    };
+    use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
+
+    #[test]
+    fn significant_words_ignore_short_tokens() {
+        assert_eq!(
+            significant_keyword_words("A torino x train"),
+            vec!["torino".to_string(), "train".to_string()]
+        );
+    }
+
+    #[test]
+    fn keyword_target_is_stable() {
+        assert_eq!(
+            hex::encode(keyword_target("Torino Train").0),
+            "b2bc3aa39f375069e7c27eb83ce6baf3"
+        );
+    }
+
+    #[test]
+    fn empty_networking_config_prefers_miniupnpc_then_rupnp() {
+        assert_eq!(
+            empty_networking_config().nat.p2p.backend_order,
+            vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_networking_config_preserves_explicit_backend_order() {
+        let mut config = EmuleAgentConfig::default();
+        let mut desired = empty_networking_config();
+        desired.nat.p2p.backend_order = vec![UPNP_RUPNP_BACKEND.to_string()];
+
+        apply_networking_config(&mut config, &desired);
+
+        assert_eq!(
+            config.nat.p2p.backend_order,
+            vec![UPNP_RUPNP_BACKEND.to_string()]
+        );
     }
 }

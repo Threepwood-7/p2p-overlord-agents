@@ -15,8 +15,8 @@ fn rc4(key: &[u8], data: &mut [u8]) {
     }
     let klen = key.len();
     let mut s = [0u8; 256];
-    for i in 0..256usize {
-        s[i] = i as u8;
+    for (i, value) in s.iter_mut().enumerate() {
+        *value = i as u8;
     }
     let mut j = 0usize;
     for i in 0..256usize {

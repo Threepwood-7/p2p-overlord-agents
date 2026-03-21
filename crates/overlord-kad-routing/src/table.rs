@@ -92,32 +92,32 @@ impl RoutingTable {
             }
             Ok(false) => {
                 // Updated existing. If IP changed, update maps.
-                if let Some(old) = old_ip {
-                    if old != new_ip {
-                        // Decrement old IP count.
-                        if let Some(cnt) = self.ip_counts.get_mut(&old) {
+                if let Some(old) = old_ip
+                    && old != new_ip
+                {
+                    // Decrement old IP count.
+                    if let Some(cnt) = self.ip_counts.get_mut(&old) {
+                        if *cnt > 1 {
+                            *cnt -= 1;
+                        } else {
+                            self.ip_counts.remove(&old);
+                        }
+                    }
+                    if !is_lan(old) {
+                        let subnet = subnet24(old);
+                        if let Some(cnt) = self.subnet_counts.get_mut(&subnet) {
                             if *cnt > 1 {
                                 *cnt -= 1;
                             } else {
-                                self.ip_counts.remove(&old);
+                                self.subnet_counts.remove(&subnet);
                             }
                         }
-                        if !is_lan(old) {
-                            let subnet = subnet24(old);
-                            if let Some(cnt) = self.subnet_counts.get_mut(&subnet) {
-                                if *cnt > 1 {
-                                    *cnt -= 1;
-                                } else {
-                                    self.subnet_counts.remove(&subnet);
-                                }
-                            }
-                        }
-                        // Increment new IP count.
-                        *self.ip_counts.entry(new_ip).or_insert(0) += 1;
-                        if !is_lan(new_ip) {
-                            let subnet = subnet24(new_ip);
-                            *self.subnet_counts.entry(subnet).or_insert(0) += 1;
-                        }
+                    }
+                    // Increment new IP count.
+                    *self.ip_counts.entry(new_ip).or_insert(0) += 1;
+                    if !is_lan(new_ip) {
+                        let subnet = subnet24(new_ip);
+                        *self.subnet_counts.entry(subnet).or_insert(0) += 1;
                     }
                 }
                 Ok(())

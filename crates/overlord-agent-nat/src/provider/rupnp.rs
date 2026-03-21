@@ -237,10 +237,10 @@ impl GatewayHandle {
                 IpAddr::V6(_) => Ipv4Addr::LOCALHOST,
             };
         }
-        if let Some(bind_ip) = config.bind_ip.as_deref() {
-            if let Ok(IpAddr::V4(ip)) = bind_ip.parse::<IpAddr>() {
-                return ip;
-            }
+        if let Some(bind_ip) = config.bind_ip.as_deref()
+            && let Ok(IpAddr::V4(ip)) = bind_ip.parse::<IpAddr>()
+        {
+            return ip;
         }
         Ipv4Addr::LOCALHOST
     }
@@ -267,11 +267,11 @@ async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
         .transpose()?;
     let timeout = Duration::from_secs(config.discovery_timeout_secs.max(1));
 
-    if let Some(igd_ip) = config.igd_ip.as_deref() {
-        if let Some(gateway) = discover_gateway_from_configured_ip(igd_ip).await? {
-            debug!("UPnP direct IGD probe succeeded for configured gateway {igd_ip}");
-            return Ok(vec![gateway]);
-        }
+    if let Some(igd_ip) = config.igd_ip.as_deref()
+        && let Some(gateway) = discover_gateway_from_configured_ip(igd_ip).await?
+    {
+        debug!("UPnP direct IGD probe succeeded for configured gateway {igd_ip}");
+        return Ok(vec![gateway]);
     }
 
     let mut gateways = Vec::new();
@@ -332,7 +332,7 @@ async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
         fallback_gateway_ips.extend(gateway_ips_for_bind_ip(bind_ip));
     }
     let preferred_gateway_ips = dedupe_ipv4_candidates(fallback_gateway_ips);
-    for gateway_ip in preferred_gateway_ips.iter().copied() {
+    for gateway_ip in &preferred_gateway_ips {
         if let Some(gateway) = discover_gateway_from_configured_ip(&gateway_ip.to_string()).await? {
             debug!("UPnP direct IGD probe succeeded for fallback gateway {gateway_ip}");
             push_gateway_candidate(&mut gateways, &mut seen_gateways, gateway);
@@ -662,12 +662,7 @@ fn gateway_ips_for_bind_ip(bind_ip: IpAddr) -> Vec<Ipv4Addr> {
         .ok()
         .into_iter()
         .flatten()
-        .filter(|adapter| {
-            adapter
-                .ip_addresses()
-                .iter()
-                .any(|candidate| *candidate == bind_ip)
-        })
+        .filter(|adapter| adapter.ip_addresses().contains(&bind_ip))
         .flat_map(|adapter| adapter.gateways().to_vec())
         .filter_map(|gateway| match gateway {
             IpAddr::V4(ip) if ip != Ipv4Addr::UNSPECIFIED => Some(ip),

@@ -1,0 +1,39 @@
+name: Rust Quality
+
+on:
+  push:
+    paths:
+      - ".github/workflows/rust-quality.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
+      - "scripts/windows/rust_quality.ps1"
+      - "crates/**"
+  pull_request:
+    paths:
+      - ".github/workflows/rust-quality.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
+      - "scripts/windows/rust_quality.ps1"
+      - "crates/**"
+
+jobs:
+  rust-quality:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run rust quality checks
+        shell: pwsh
+        run: ./scripts/windows/rust_quality.ps1

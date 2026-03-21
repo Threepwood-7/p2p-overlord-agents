@@ -20,8 +20,8 @@ impl NodeId {
     /// XOR distance between two node IDs.
     pub fn distance(&self, other: &Self) -> NodeId {
         let mut result = [0u8; 16];
-        for i in 0..16 {
-            result[i] = self.0[i] ^ other.0[i];
+        for (index, slot) in result.iter_mut().enumerate() {
+            *slot = self.0[index] ^ other.0[index];
         }
         NodeId(result)
     }
