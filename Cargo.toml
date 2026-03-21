@@ -34,3 +34,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 futures-util = "0.3"
+
+[patch.crates-io]
+rupnp = { path = "../ext-deps/rust/rupnp" }

@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
@@ -14,6 +15,7 @@ use rupnp::{
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{net::UdpSocket, sync::RwLock};
+use tracing::debug;
 
 use crate::{
     config::NatConfig,
@@ -76,56 +78,23 @@ impl PortMappingProvider for RupnpPortMappingProvider {
             return Ok(());
         }
 
-        let gateway = discover_gateway(config).await?;
-        let external_ip_text = if let Some(override_ip) = config.external_ip_override.clone() {
-            Some(override_ip)
-        } else {
-            gateway.external_ip().await.ok()
-        };
-
-        let mut mapped = Vec::with_capacity(mappings.len());
-        for spec in mappings {
-            let external_port = spec
-                .preferred_external_port
-                .unwrap_or_else(|| spec.local_addr.port());
-            gateway
-                .add_mapping(config, config.lease_duration_secs, spec, external_port)
-                .await
-                .with_context(|| format!("failed to add {} mapping", spec.name))?;
-
-            let external_ip = external_ip_text
-                .clone()
-                .unwrap_or_else(|| gateway.mapping_internal_ip(config, spec).to_string())
-                .parse::<IpAddr>()
-                .with_context(|| format!("invalid external ip for {}", spec.name))?;
-
-            mapped.push(MappedEndpoint {
-                name: spec.name.clone(),
-                protocol: spec.protocol,
-                local_addr: spec.local_addr,
-                external_addr: SocketAddr::new(external_ip, external_port),
-                lease_expires_in_secs: config.lease_duration_secs,
-                backend: self.name().to_string(),
-            });
+        let gateways = discover_gateways(config).await?;
+        let mut last_error = None;
+        for gateway in gateways {
+            match reconcile_gateway(self.name(), &gateway, config, mappings, Arc::clone(&status)).await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    debug!(
+                        "UPnP gateway candidate {} failed to reconcile: {error}",
+                        gateway.device.url()
+                    );
+                    last_error = Some(error);
+                }
+            }
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let mut guard = status.write().await;
-        guard.enabled = true;
-        guard.gateway_discovered = true;
-        guard.backend = Some(self.name().to_string());
-        guard.bind_ip = config.bind_ip.clone();
-        guard.igd_ip = config.igd_ip.clone();
-        guard.external_ip_override = config.external_ip_override.clone();
-        guard.gateway = Some(gateway.selected_gateway(external_ip_text.clone()));
-        guard.observed_external_addresses = external_ip_text.into_iter().collect();
-        guard.mappings = mapped;
-        guard.last_refresh_unix_secs = Some(now);
-        guard.last_error = None;
-        Ok(())
+        Err(last_error.unwrap_or_else(|| anyhow!("no usable UPnP IGD service discovered")))
     }
 
     async fn release(
@@ -137,23 +106,90 @@ impl PortMappingProvider for RupnpPortMappingProvider {
         if mappings.is_empty() {
             return Ok(());
         }
-        let gateway = discover_gateway(config).await?;
-        for mapping in mappings {
-            let spec = MappingSpec {
-                name: mapping.name.clone(),
-                local_addr: mapping.local_addr,
-                protocol: mapping.protocol,
-                exposure: Default::default(),
-                preferred_external_port: Some(mapping.external_addr.port()),
-            };
-            let _ = gateway
-                .delete_mapping(&spec, mapping.external_addr.port())
-                .await;
+        for gateway in discover_gateways(config).await? {
+            for mapping in mappings {
+                let spec = MappingSpec {
+                    name: mapping.name.clone(),
+                    local_addr: mapping.local_addr,
+                    protocol: mapping.protocol,
+                    exposure: Default::default(),
+                    preferred_external_port: Some(mapping.external_addr.port()),
+                };
+                let _ = gateway
+                    .delete_mapping(&spec, mapping.external_addr.port())
+                    .await;
+            }
         }
         let mut guard = status.write().await;
         guard.mappings.clear();
         Ok(())
     }
+}
+
+async fn reconcile_gateway(
+    backend_name: &str,
+    gateway: &GatewayHandle,
+    config: &NatConfig,
+    mappings: &[MappingSpec],
+    status: Arc<RwLock<NatStatus>>,
+) -> Result<()> {
+    let external_ip_text = if let Some(override_ip) = config.external_ip_override.clone() {
+        Some(override_ip)
+    } else {
+        gateway.external_ip().await.ok()
+    };
+
+    let mut mapped = Vec::with_capacity(mappings.len());
+    let mut applied = Vec::with_capacity(mappings.len());
+    for spec in mappings {
+        let external_port = spec
+            .preferred_external_port
+            .unwrap_or_else(|| spec.local_addr.port());
+        if let Err(error) = gateway
+            .add_mapping(config, config.lease_duration_secs, spec, external_port)
+            .await
+            .with_context(|| format!("failed to add {} mapping", spec.name))
+        {
+            for (applied_spec, applied_port) in applied.into_iter().rev() {
+                let _ = gateway.delete_mapping(applied_spec, applied_port).await;
+            }
+            return Err(error);
+        }
+        applied.push((spec, external_port));
+
+        let external_ip = external_ip_text
+            .clone()
+            .unwrap_or_else(|| gateway.mapping_internal_ip(config, spec).to_string())
+            .parse::<IpAddr>()
+            .with_context(|| format!("invalid external ip for {}", spec.name))?;
+
+        mapped.push(MappedEndpoint {
+            name: spec.name.clone(),
+            protocol: spec.protocol,
+            local_addr: spec.local_addr,
+            external_addr: SocketAddr::new(external_ip, external_port),
+            lease_expires_in_secs: config.lease_duration_secs,
+            backend: backend_name.to_string(),
+        });
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut guard = status.write().await;
+    guard.enabled = true;
+    guard.gateway_discovered = true;
+    guard.backend = Some(backend_name.to_string());
+    guard.bind_ip = config.bind_ip.clone();
+    guard.igd_ip = config.igd_ip.clone();
+    guard.external_ip_override = config.external_ip_override.clone();
+    guard.gateway = Some(gateway.selected_gateway(external_ip_text.clone()));
+    guard.observed_external_addresses = external_ip_text.into_iter().collect();
+    guard.mappings = mapped;
+    guard.last_refresh_unix_secs = Some(now);
+    guard.last_error = None;
+    Ok(())
 }
 
 impl GatewayHandle {
@@ -239,7 +275,7 @@ impl GatewayHandle {
     }
 }
 
-async fn discover_gateway(config: &NatConfig) -> Result<GatewayHandle> {
+async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
     let bind_ip = config
         .bind_ip
         .as_deref()
@@ -252,29 +288,124 @@ async fn discover_gateway(config: &NatConfig) -> Result<GatewayHandle> {
 
     if let Some(igd_ip) = config.igd_ip.as_deref() {
         if let Some(gateway) = discover_gateway_from_configured_ip(igd_ip).await? {
-            return Ok(gateway);
+            debug!("UPnP direct IGD probe succeeded for configured gateway {igd_ip}");
+            return Ok(vec![gateway]);
         }
     }
 
-    let devices = if let Some(bind_ip) = bind_ip {
-        discover_root_devices_via_bind_ip(bind_ip, timeout).await?
-    } else {
-        let devices = rupnp::discover(&SearchTarget::RootDevice, timeout, None).await?;
-        let mut devices = Box::pin(devices);
-        let mut discovered = Vec::new();
-        while let Some(device) = devices.try_next().await? {
-            discovered.push(device);
-        }
-        discovered
-    };
-
+    let mut gateways = Vec::new();
+    let mut seen_gateways = HashSet::new();
     let mut fallback_gateway_ips = Vec::new();
+
+    if let Some(bind_ip) = bind_ip {
+        match discover_root_devices_via_bind_ip(bind_ip, timeout).await {
+            Ok(devices) => {
+                debug!(
+                    "UPnP bind-ip SSDP discovery on {bind_ip} returned {} root devices",
+                    devices.len()
+                );
+                record_devices(
+                    devices,
+                    config.igd_ip.as_deref(),
+                    &mut fallback_gateway_ips,
+                    &mut gateways,
+                    &mut seen_gateways,
+                );
+            }
+            Err(error) => {
+                debug!("UPnP bind-ip SSDP discovery on {bind_ip} failed: {error}");
+            }
+        }
+
+        if gateways.is_empty() {
+            match discover_root_devices(timeout).await {
+                Ok(devices) => {
+                    debug!(
+                        "UPnP generic SSDP discovery returned {} root devices after bind-ip discovery",
+                        devices.len()
+                    );
+                    record_devices(
+                        devices,
+                        config.igd_ip.as_deref(),
+                        &mut fallback_gateway_ips,
+                        &mut gateways,
+                        &mut seen_gateways,
+                    );
+                }
+                Err(error) => {
+                    debug!("UPnP generic SSDP discovery failed: {error}");
+                }
+            }
+        }
+    } else {
+        record_devices(
+            discover_root_devices(timeout).await?,
+            config.igd_ip.as_deref(),
+            &mut fallback_gateway_ips,
+            &mut gateways,
+            &mut seen_gateways,
+        );
+    }
+
+    if let Some(bind_ip) = bind_ip {
+        fallback_gateway_ips.extend(gateway_ips_for_bind_ip(bind_ip));
+    }
+    let preferred_gateway_ips = dedupe_ipv4_candidates(fallback_gateway_ips);
+    for gateway_ip in preferred_gateway_ips.iter().copied() {
+        if let Some(gateway) = discover_gateway_from_configured_ip(&gateway_ip.to_string()).await? {
+            debug!("UPnP direct IGD probe succeeded for fallback gateway {gateway_ip}");
+            push_gateway_candidate(&mut gateways, &mut seen_gateways, gateway);
+        }
+    }
+
+    if let Some(bind_ip) = bind_ip {
+        gateways.sort_by_key(|gateway| {
+            Reverse(gateway_preference_score(
+                gateway,
+                bind_ip,
+                &config.igd_ip,
+                &preferred_gateway_ips,
+            ))
+        });
+    }
+
+    if !gateways.is_empty() {
+        debug!(
+            "UPnP discovery produced {} gateway candidate(s): {}",
+            gateways.len(),
+            gateways
+                .iter()
+                .filter_map(|gateway| gateway.device.url().host())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        return Ok(gateways);
+    }
+
+    if config.igd_ip.is_some() {
+        Err(anyhow!("no matching IGD found for configured nat.igd_ip"))
+    } else if let Some(bind_ip) = bind_ip {
+        Err(anyhow!(
+            "no UPnP IGD service discovered for nat.bind_ip {bind_ip}; on point-to-point VPNs you may need to set nat.igd_ip explicitly"
+        ))
+    } else {
+        Err(anyhow!("no UPnP IGD service discovered"))
+    }
+}
+
+fn record_devices(
+    devices: Vec<Device>,
+    requested_igd_ip: Option<&str>,
+    fallback_gateway_ips: &mut Vec<Ipv4Addr>,
+    gateways: &mut Vec<GatewayHandle>,
+    seen_gateways: &mut HashSet<String>,
+) {
     for device in devices {
         if let Some(host) = device.url().host() {
-            append_unique_ipv4_candidate(&mut fallback_gateway_ips, host);
+            append_unique_ipv4_candidate(fallback_gateway_ips, host);
         }
 
-        if let Some(requested_igd_ip) = config.igd_ip.as_deref() {
+        if let Some(requested_igd_ip) = requested_igd_ip {
             let matches = device
                 .url()
                 .host()
@@ -285,31 +416,71 @@ async fn discover_gateway(config: &NatConfig) -> Result<GatewayHandle> {
             }
         }
 
-        for urn in [
-            WAN_IP_CONNECTION_2,
-            WAN_IP_CONNECTION_1,
-            WAN_PPP_CONNECTION_1,
-        ] {
-            let service = device.find_service(&urn).cloned();
-            if let Some(service) = service {
-                return Ok(GatewayHandle { device, service });
-            }
+        if let Some(gateway) = gateway_from_device(device) {
+            push_gateway_candidate(gateways, seen_gateways, gateway);
         }
     }
+}
 
-    if let Some(bind_ip) = bind_ip {
-        fallback_gateway_ips.extend(gateway_ips_for_bind_ip(bind_ip));
+async fn discover_root_devices(timeout: Duration) -> Result<Vec<Device>> {
+    let devices = rupnp::discover(&SearchTarget::RootDevice, timeout, None).await?;
+    let mut devices = Box::pin(devices);
+    let mut discovered = Vec::new();
+    while let Some(device) = devices.try_next().await? {
+        discovered.push(device);
     }
-    for gateway_ip in dedupe_ipv4_candidates(fallback_gateway_ips) {
-        if let Some(gateway) = discover_gateway_from_configured_ip(&gateway_ip.to_string()).await? {
-            return Ok(gateway);
+    Ok(discovered)
+}
+
+fn gateway_from_device(device: Device) -> Option<GatewayHandle> {
+    for urn in [
+        WAN_IP_CONNECTION_2,
+        WAN_IP_CONNECTION_1,
+        WAN_PPP_CONNECTION_1,
+    ] {
+        let service = device.find_service(&urn).cloned();
+        if let Some(service) = service {
+            return Some(GatewayHandle { device, service });
         }
     }
+    None
+}
 
-    if config.igd_ip.is_some() {
-        Err(anyhow!("no matching IGD found for configured nat.igd_ip"))
-    } else {
-        Err(anyhow!("no UPnP IGD service discovered"))
+fn push_gateway_candidate(
+    gateways: &mut Vec<GatewayHandle>,
+    seen_gateways: &mut HashSet<String>,
+    gateway: GatewayHandle,
+) {
+    let key = gateway.device.url().to_string();
+    if seen_gateways.insert(key) {
+        gateways.push(gateway);
+    }
+}
+
+fn gateway_preference_score(
+    gateway: &GatewayHandle,
+    bind_ip: IpAddr,
+    requested_igd_ip: &Option<String>,
+    preferred_gateway_ips: &[Ipv4Addr],
+) -> u8 {
+    let Some(host) = gateway.device.url().host() else {
+        return 0;
+    };
+    let Ok(IpAddr::V4(host_ip)) = host.parse::<IpAddr>() else {
+        return 0;
+    };
+    if requested_igd_ip
+        .as_deref()
+        .is_some_and(|candidate| candidate == host)
+    {
+        return 100;
+    }
+    if preferred_gateway_ips.contains(&host_ip) {
+        return 90;
+    }
+    match bind_ip {
+        IpAddr::V4(bind_ip) if host_ip.octets()[0] == bind_ip.octets()[0] => 50,
+        _ => 0,
     }
 }
 
