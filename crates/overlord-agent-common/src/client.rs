@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use reqwest::Url;
 
 use crate::types::{
-    AgentInterfacesView, AgentNetworkReport, ConfigUpdate, IndexerRegistration, IndexerStats, PopularHash,
-    RegisterRequest, RegistrationResponse, ResultBatch, SearchCancelRequest, SearchEvent, SearchJob,
-    SearchKind, SnoopEntry,
+    AgentInterfacesView, AgentNetworkReport, ConfigUpdate, IndexerRegistration, IndexerStats,
+    PopularHash, RegisterRequest, RegistrationResponse, ResultBatch, SearchCancelRequest,
+    SearchEvent, SearchJob, SearchKind, SnoopEntry,
 };
 
 #[derive(Clone)]
@@ -61,7 +61,9 @@ impl CoordinatorClient {
     pub async fn dispatch_search(&self, job: &SearchJob) -> Result<()> {
         let url = self.base_url.join("/api/search")?;
         if job.kind != SearchKind::Keyword {
-            anyhow::bail!("only keyword searches can be dispatched through the public coordinator api");
+            anyhow::bail!(
+                "only keyword searches can be dispatched through the public coordinator api"
+            );
         }
         self.http
             .post(url)
@@ -151,7 +153,10 @@ impl CoordinatorClient {
             .await?)
     }
 
-    pub async fn agent_interfaces_view(&self, indexer_id: uuid::Uuid) -> Result<AgentInterfacesView> {
+    pub async fn agent_interfaces_view(
+        &self,
+        indexer_id: uuid::Uuid,
+    ) -> Result<AgentInterfacesView> {
         let url = self
             .base_url
             .join(&format!("/api/agents/{indexer_id}/interfaces"))?;

@@ -50,7 +50,7 @@ struct SharedArgs {
     #[arg(long, default_value_t = 41_001)]
     tcp_port: u16,
     #[arg(long)]
-    ssdp_bind_addr: Option<String>,
+    ssdp_bind_ip: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -91,7 +91,7 @@ fn init_tracing() {
 }
 
 async fn run_map(args: MapArgs) -> Result<()> {
-    apply_ssdp_bind_override(args.shared.ssdp_bind_addr.as_deref());
+    apply_ssdp_bind_override(args.shared.ssdp_bind_ip.as_deref());
 
     let provider = resolve_provider(&args.shared.backend)?;
     let config = build_config(&args.shared);
@@ -111,8 +111,8 @@ async fn run_map(args: MapArgs) -> Result<()> {
     }
 
     info!(
-        "reconciling backend={} bind_ip={:?} igd_ip={:?} ssdp_bind_addr={:?}",
-        args.shared.backend, args.shared.bind_ip, args.shared.igd_ip, args.shared.ssdp_bind_addr
+        "reconciling backend={} bind_ip={:?} igd_ip={:?} ssdp_bind_ip={:?}",
+        args.shared.backend, args.shared.bind_ip, args.shared.igd_ip, args.shared.ssdp_bind_ip
     );
     provider
         .reconcile(&config, &mappings, Arc::clone(&status))
@@ -139,7 +139,7 @@ async fn run_map(args: MapArgs) -> Result<()> {
 }
 
 async fn run_cleanup(args: CleanupArgs) -> Result<()> {
-    apply_ssdp_bind_override(args.shared.ssdp_bind_addr.as_deref());
+    apply_ssdp_bind_override(args.shared.ssdp_bind_ip.as_deref());
 
     let provider = resolve_provider(&args.shared.backend)?;
     let config = build_config(&args.shared);
@@ -164,12 +164,13 @@ fn default_backend_arg() -> String {
         .unwrap_or_else(|| "upnp_rupnp".to_string())
 }
 
-fn apply_ssdp_bind_override(ssdp_bind_addr: Option<&str>) {
-    if let Some(addr) = ssdp_bind_addr {
+fn apply_ssdp_bind_override(ssdp_bind_ip: Option<&str>) {
+    if let Some(ip) = ssdp_bind_ip {
+        let bind_addr = format!("{ip}:0");
         unsafe {
-            std::env::set_var("SSDP_CLIENT_BIND_ADDR", addr);
+            std::env::set_var("SSDP_CLIENT_BIND_ADDR", &bind_addr);
         }
-        info!("set SSDP_CLIENT_BIND_ADDR={addr}");
+        info!("set SSDP_CLIENT_BIND_ADDR={bind_addr}");
     }
 }
 

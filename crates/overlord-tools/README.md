@@ -37,7 +37,7 @@ cargo run -p overlord-tools --bin minirupnpc -- map --bind-ip 10.54.220.34 --hol
 Force the lower-level SSDP bind override used during discovery debugging:
 
 ```bat
-cargo run -p overlord-tools --bin minirupnpc -- map --bind-ip 10.54.220.34 --ssdp-bind-addr 0.0.0.0:0
+cargo run -p overlord-tools --bin minirupnpc -- map --bind-ip 10.54.220.34 --ssdp-bind-ip 0.0.0.0
 ```
 
 Delete the standard test mappings:

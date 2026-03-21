@@ -1079,11 +1079,9 @@ dependencies = [
  "ipconfig",
  "rupnp",
  "serde",
- "serde_json",
  "socket2 0.5.10",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1133,6 +1131,20 @@ version = "0.1.0"
 dependencies = [
  "overlord-kad-proto",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "overlord-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "overlord-agent-nat",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

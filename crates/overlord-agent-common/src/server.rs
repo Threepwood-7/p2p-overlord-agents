@@ -252,7 +252,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgentNetworkReport, ConfigUpdate, IndexerStats, Protocol, SearchJob, SearchKind};
+    use crate::types::{
+        AgentNetworkReport, ConfigUpdate, IndexerStats, Protocol, SearchJob, SearchKind,
+    };
     use anyhow::Result;
     use async_trait::async_trait;
     use tokio::{
@@ -349,7 +351,9 @@ mod tests {
             .expect("shutdown should complete even if the client keeps the socket open")
             .unwrap();
 
-        let _ = socket.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        let _ = socket
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await;
     }
 
     #[tokio::test]
@@ -363,7 +367,10 @@ mod tests {
 
         let client = reqwest::Client::new();
         let response = client
-            .post(format!("http://{}/api/internal/search", server.local_addr()))
+            .post(format!(
+                "http://{}/api/internal/search",
+                server.local_addr()
+            ))
             .json(&serde_json::json!({
                 "job_id": Uuid::new_v4(),
                 "kind": SearchKind::Keyword,

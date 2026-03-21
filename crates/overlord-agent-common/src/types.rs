@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-pub use overlord_agent_nat::{AgentNetworkReport, AgentNetworkingConfig};
 use overlord_agent_nat::NatStatusSnapshot;
+pub use overlord_agent_nat::{AgentNetworkReport, AgentNetworkingConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;

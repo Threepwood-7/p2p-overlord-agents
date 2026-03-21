@@ -316,7 +316,6 @@ async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
                 }
             }
         }
-
     } else {
         record_devices(
             discover_root_devices(timeout).await?,
