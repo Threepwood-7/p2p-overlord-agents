@@ -690,7 +690,7 @@ mod tests {
         let injector = transport.injector();
         let rpc = RpcManager::new(
             Arc::clone(&transport),
-            ObfuscationLayer::new(0, false),
+            ObfuscationLayer::new(NodeId::ZERO, 0, false),
             RpcConfig::default(),
         );
         let _handle = rpc.start();
@@ -766,7 +766,7 @@ mod tests {
         let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
         let rpc = RpcManager::new(
             Arc::clone(&transport),
-            ObfuscationLayer::new(0, false),
+            ObfuscationLayer::new(NodeId::ZERO, 0, false),
             RpcConfig::default(),
         );
         let _handle = rpc.start();
@@ -816,7 +816,7 @@ mod tests {
         let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
         let rpc = RpcManager::new(
             Arc::clone(&transport),
-            ObfuscationLayer::new(0, false),
+            ObfuscationLayer::new(NodeId::ZERO, 0, false),
             RpcConfig::default(),
         );
         let _handle = rpc.start();

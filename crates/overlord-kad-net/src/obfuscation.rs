@@ -1,13 +1,46 @@
-use overlord_kad_proto::constants::OP_KADEMLIAHEADER;
+use md5::compute as md5_compute;
+use overlord_kad_proto::constants::{OP_KADEMLIAHEADER, OP_KADEMLIAPACKEDPROT, opcode};
+use overlord_kad_proto::NodeId;
 use rand::Rng;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 
-// NOTE: eMule uses MD5 for key derivation. Using SHA256 here for now.
-// Verify against live network in Phase 3 and update if needed.
-// See KADKAD.md §9 Obfuscation for details.
+/// Kad UDP obfuscation sync constant used by the oracle `EncryptedDatagramSocket`.
+const MAGICVALUE_UDP_SYNC_CLIENT: u32 = 0x395F_2EC1;
+
+/// Marker value used when the packet is encrypted with the receiver verify key.
+const KAD_MARKER_RECEIVER_KEY: u8 = 0x02;
+
+/// Padding is disabled in the oracle UDP path today, but the parser still
+/// accepts it so we keep the same shape here.
+const UDP_PADDING_LEN: u8 = 0;
+
+#[derive(Debug, Clone, Default)]
+struct PeerCryptoState {
+    /// Latest sender verify key learned from an obfuscated packet sent by this
+    /// peer to us. This is the key the oracle reuses for reply packets.
+    receiver_verify_key: Option<u32>,
+    /// Target node ID used for NodeID-based request obfuscation.
+    node_id: Option<NodeId>,
+}
+
+/// Result of attempting to decrypt an incoming packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecryptResult {
+    /// Decrypted Kad payload, or the original buffer when no obfuscation was used.
+    pub data: Vec<u8>,
+    /// Whether the packet was successfully parsed as obfuscated Kad UDP.
+    pub was_obfuscated: bool,
+    /// Sender verify key recovered from the encrypted trailer.
+    pub sender_verify_key: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KadKeyMode {
+    NodeId,
+    ReceiverVerifyKey,
+}
 
 fn rc4(key: &[u8], data: &mut [u8]) {
     if key.is_empty() || data.is_empty() {
@@ -33,200 +66,351 @@ fn rc4(key: &[u8], data: &mut [u8]) {
     }
 }
 
-fn derive_key(seed0: u8, seed1: u8, udp_key: u32) -> [u8; 16] {
-    let mut hasher = Sha256::new();
-    hasher.update([seed0, seed1]);
-    hasher.update(udp_key.to_le_bytes());
-    let hash = hasher.finalize();
-    let mut key = [0u8; 16];
-    key.copy_from_slice(&hash[..16]);
-    key
+fn md5_key_material(bytes: &[u8]) -> [u8; 16] {
+    md5_compute(bytes).0
 }
 
+fn derive_kad_request_key(node_id: NodeId, random_key_part: u16) -> [u8; 16] {
+    let mut key_data = [0u8; 18];
+    key_data[..16].copy_from_slice(&node_id.0);
+    key_data[16..18].copy_from_slice(&random_key_part.to_le_bytes());
+    md5_key_material(&key_data)
+}
+
+fn derive_kad_receiver_key(receiver_verify_key: u32, random_key_part: u16) -> [u8; 16] {
+    let mut key_data = [0u8; 6];
+    key_data[..4].copy_from_slice(&receiver_verify_key.to_le_bytes());
+    key_data[4..6].copy_from_slice(&random_key_part.to_le_bytes());
+    md5_key_material(&key_data)
+}
+
+fn derive_udp_verify_key(our_udp_key: u32, target_ip: Ipv4Addr) -> u32 {
+    // This mirrors eMule `CPrefs::GetUDPVerifyKey` on Windows: the 64-bit value
+    // is laid out in native little-endian memory before hashing.
+    let packed = ((our_udp_key as u64) << 32) | u64::from(u32::from_be_bytes(target_ip.octets()));
+    let digest = md5_key_material(&packed.to_le_bytes());
+    let folded = u32::from_le_bytes(digest[0..4].try_into().unwrap())
+        ^ u32::from_le_bytes(digest[4..8].try_into().unwrap())
+        ^ u32::from_le_bytes(digest[8..12].try_into().unwrap())
+        ^ u32::from_le_bytes(digest[12..16].try_into().unwrap());
+    (folded % 0xFFFF_FFFE) + 1
+}
+
+fn marker_try_order(marker: u8) -> [KadKeyMode; 2] {
+    match marker & 0x03 {
+        0x02 => [KadKeyMode::ReceiverVerifyKey, KadKeyMode::NodeId],
+        _ => [KadKeyMode::NodeId, KadKeyMode::ReceiverVerifyKey],
+    }
+}
+
+fn response_like_opcode(opcode: u8) -> bool {
+    matches!(
+        opcode,
+        opcode::BOOTSTRAP_RES
+            | opcode::HELLO_RES
+            | opcode::HELLO_RES_ACK
+            | opcode::RES
+            | opcode::SEARCH_RES
+            | opcode::PUBLISH_RES
+            | opcode::PUBLISH_RES_ACK
+            | opcode::FIREWALLED_RES
+            | opcode::FIREWALLED_ACK_RES
+            | opcode::PONG
+    )
+}
+
+fn is_plain_protocol_marker(byte: u8) -> bool {
+    matches!(byte, 0xE3 | 0xE4 | 0xE5 | 0xA3 | 0xC5 | 0xD4)
+}
+
+fn select_marker(mode: KadKeyMode) -> u8 {
+    let mut rng = rand::thread_rng();
+    loop {
+        let mut marker: u8 = rng.r#gen();
+        marker &= !0x03;
+        if matches!(mode, KadKeyMode::ReceiverVerifyKey) {
+            marker |= KAD_MARKER_RECEIVER_KEY;
+        }
+        if !is_plain_protocol_marker(marker) {
+            return marker;
+        }
+    }
+}
+
+/// Oracle-shaped Kad UDP obfuscation layer.
+///
+/// This mirrors the Kad branch of eMule/aMule `EncryptedDatagramSocket`:
+/// request packets prefer NodeID-based obfuscation, while response packets use
+/// the sender verify key recovered from prior obfuscated traffic.
 pub struct ObfuscationLayer {
-    our_key: u32,
+    our_node_id: NodeId,
+    our_udp_key: u32,
     enabled: bool,
-    peer_keys: Mutex<HashMap<SocketAddr, u32>>,
+    peers: Mutex<HashMap<SocketAddr, PeerCryptoState>>,
 }
 
 impl ObfuscationLayer {
-    pub fn new(our_key: u32, enabled: bool) -> Self {
+    pub fn new(our_node_id: NodeId, our_udp_key: u32, enabled: bool) -> Self {
         Self {
-            our_key,
+            our_node_id,
+            our_udp_key,
             enabled,
-            peer_keys: Mutex::new(HashMap::new()),
+            peers: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Register a peer's UDP key (learned from their HELLO packet).
+    /// Register a peer node ID so outbound requests can use NodeID-based Kad obfuscation.
+    pub fn register_peer_identity(&self, addr: SocketAddr, node_id: NodeId) {
+        let mut guard = self.peers.lock().unwrap();
+        guard.entry(addr).or_default().node_id = Some(node_id);
+    }
+
+    /// Register the latest sender verify key learned from an obfuscated packet.
+    ///
+    /// The oracle stores this as the peer's `CKadUDPKey` value bound to our own
+    /// public IP and reuses it for reply packets.
     pub fn register_peer_key(&self, addr: SocketAddr, key: u32) {
-        let mut guard = self.peer_keys.lock().unwrap();
-        guard.insert(addr, key);
-    }
-
-    /// Get a peer's known UDP key.
-    pub fn peer_key(&self, addr: SocketAddr) -> Option<u32> {
-        let guard = self.peer_keys.lock().unwrap();
-        guard.get(&addr).copied()
-    }
-
-    /// Our own UDP key (sent to peers in HELLO).
-    pub fn our_key(&self) -> u32 {
-        self.our_key
+        let mut guard = self.peers.lock().unwrap();
+        guard.entry(addr).or_default().receiver_verify_key = Some(key);
     }
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    /// Encrypt `plaintext` for sending to `addr`.
-    /// If obfuscation is disabled or peer key is unknown: return plaintext as-is.
-    /// Otherwise: prepend obfuscation header and RC4-encrypt the payload.
-    pub fn encrypt(&self, addr: SocketAddr, plaintext: &[u8]) -> Vec<u8> {
+    /// Our locally generated Kad UDP anti-spoofing seed.
+    pub fn our_udp_key(&self) -> u32 {
+        self.our_udp_key
+    }
+
+    /// Derive the verify key we would announce to a specific IPv4 peer.
+    pub fn verify_key_for_ip(&self, ip: Ipv4Addr) -> u32 {
+        derive_udp_verify_key(self.our_udp_key, ip)
+    }
+
+    /// Encrypt a Kad packet for sending to `addr`.
+    ///
+    /// The caller supplies the opcode so we can mirror the oracle preference:
+    /// request packets use NodeID obfuscation when possible, while replies
+    /// prefer the receiver verify key learned from prior traffic.
+    pub fn encrypt(&self, addr: SocketAddr, opcode: u8, plaintext: &[u8]) -> Vec<u8> {
         if !self.enabled {
             return plaintext.to_vec();
         }
 
-        let peer_key = match self.peer_key(addr) {
-            Some(k) => k,
-            None => return plaintext.to_vec(),
+        let peer = self.peers.lock().unwrap().get(&addr).cloned().unwrap_or_default();
+        let preferred_mode = if response_like_opcode(opcode) {
+            if peer.receiver_verify_key.is_some() {
+                Some(KadKeyMode::ReceiverVerifyKey)
+            } else if peer.node_id.is_some() {
+                Some(KadKeyMode::NodeId)
+            } else {
+                None
+            }
+        } else if peer.node_id.is_some() {
+            Some(KadKeyMode::NodeId)
+        } else if peer.receiver_verify_key.is_some() {
+            Some(KadKeyMode::ReceiverVerifyKey)
+        } else {
+            None
         };
 
-        let mut rng = rand::thread_rng();
+        let Some(mode) = preferred_mode else {
+            return plaintext.to_vec();
+        };
 
-        // Generate r0, r1 — neither can be 0xE4 (OP_KADEMLIAHEADER)
-        let r0 = loop {
-            let b: u8 = rng.r#gen();
-            if b != OP_KADEMLIAHEADER {
-                break b;
+        let random_key_part: u16 = rand::thread_rng().r#gen();
+        let rc4_key = match mode {
+            KadKeyMode::NodeId => derive_kad_request_key(peer.node_id.unwrap(), random_key_part),
+            KadKeyMode::ReceiverVerifyKey => {
+                derive_kad_receiver_key(peer.receiver_verify_key.unwrap(), random_key_part)
             }
         };
-        let r1 = loop {
-            let b: u8 = rng.r#gen();
-            if b != OP_KADEMLIAHEADER {
-                break b;
-            }
+
+        let sender_verify_key = match addr.ip() {
+            IpAddr::V4(ip) => self.verify_key_for_ip(ip),
+            IpAddr::V6(_) => return plaintext.to_vec(),
         };
 
-        // Build header: [r0, r1, 0xD1, padding_len=0x00]
-        let header = [r0, r1, 0xD1u8, 0x00u8];
+        let mut encrypted_tail = Vec::with_capacity(13 + plaintext.len());
+        encrypted_tail.extend_from_slice(&MAGICVALUE_UDP_SYNC_CLIENT.to_le_bytes());
+        encrypted_tail.push(UDP_PADDING_LEN);
+        encrypted_tail.extend_from_slice(
+            &peer.receiver_verify_key.unwrap_or_default().to_le_bytes(),
+        );
+        encrypted_tail.extend_from_slice(&sender_verify_key.to_le_bytes());
+        encrypted_tail.extend_from_slice(plaintext);
+        rc4(&rc4_key, &mut encrypted_tail);
 
-        // Derive key and encrypt
-        let key = derive_key(r0, r1, peer_key);
-        let mut payload = plaintext.to_vec();
-        rc4(&key, &mut payload);
-
-        let mut result = Vec::with_capacity(header.len() + payload.len());
-        result.extend_from_slice(&header);
-        result.extend_from_slice(&payload);
+        let mut result = Vec::with_capacity(3 + encrypted_tail.len());
+        result.push(select_marker(mode));
+        result.extend_from_slice(&random_key_part.to_le_bytes());
+        result.extend_from_slice(&encrypted_tail);
         result
     }
 
-    /// Attempt to decrypt an incoming packet.
-    /// Returns (data, was_obfuscated).
-    /// If buf[2] != 0xD1 or decryption yields invalid header: returns (buf.to_vec(), false).
-    pub fn decrypt(&self, buf: &[u8]) -> (Vec<u8>, bool) {
-        if buf.len() < 4 {
-            return (buf.to_vec(), false);
+    /// Attempt to decrypt an incoming Kad packet.
+    pub fn decrypt(&self, from: SocketAddr, buf: &[u8]) -> DecryptResult {
+        if buf.len() < 3 {
+            return DecryptResult {
+                data: buf.to_vec(),
+                was_obfuscated: false,
+                sender_verify_key: None,
+            };
         }
 
-        if buf[2] != 0xD1 {
-            return (buf.to_vec(), false);
+        if matches!(buf[0], OP_KADEMLIAHEADER | OP_KADEMLIAPACKEDPROT) {
+            return DecryptResult {
+                data: buf.to_vec(),
+                was_obfuscated: false,
+                sender_verify_key: None,
+            };
         }
 
-        let padding = buf[3] as usize;
-        let payload_start = 4 + padding;
+        let random_key_part = u16::from_le_bytes([buf[1], buf[2]]);
+        let remote_ip = match from.ip() {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => {
+                return DecryptResult {
+                    data: buf.to_vec(),
+                    was_obfuscated: false,
+                    sender_verify_key: None,
+                };
+            }
+        };
 
-        if buf.len() <= payload_start {
-            return (buf.to_vec(), false);
+        for mode in marker_try_order(buf[0]) {
+            let rc4_key = match mode {
+                KadKeyMode::NodeId => derive_kad_request_key(self.our_node_id, random_key_part),
+                KadKeyMode::ReceiverVerifyKey => {
+                    derive_kad_receiver_key(self.verify_key_for_ip(remote_ip), random_key_part)
+                }
+            };
+
+            let mut decrypted = buf[3..].to_vec();
+            rc4(&rc4_key, &mut decrypted);
+            if decrypted.len() < 13 {
+                continue;
+            }
+
+            let magic = u32::from_le_bytes(decrypted[0..4].try_into().unwrap());
+            if magic != MAGICVALUE_UDP_SYNC_CLIENT {
+                continue;
+            }
+
+            let padding_len = usize::from(decrypted[4] & 0x0F);
+            let payload_offset = 5 + padding_len + 8;
+            if decrypted.len() <= payload_offset {
+                continue;
+            }
+
+            let sender_verify_key = u32::from_le_bytes(
+                decrypted[5 + padding_len + 4..5 + padding_len + 8]
+                    .try_into()
+                    .unwrap(),
+            );
+            let payload = decrypted.split_off(payload_offset);
+            if payload.first().copied() != Some(OP_KADEMLIAHEADER)
+                && payload.first().copied() != Some(OP_KADEMLIAPACKEDPROT)
+            {
+                continue;
+            }
+
+            return DecryptResult {
+                data: payload,
+                was_obfuscated: true,
+                sender_verify_key: Some(sender_verify_key),
+            };
         }
 
-        let key = derive_key(buf[0], buf[1], self.our_key);
-        let mut decrypted = buf[payload_start..].to_vec();
-        rc4(&key, &mut decrypted);
-
-        if !decrypted.is_empty() && decrypted[0] == OP_KADEMLIAHEADER {
-            (decrypted, true)
-        } else {
-            (buf.to_vec(), false)
+        DecryptResult {
+            data: buf.to_vec(),
+            was_obfuscated: false,
+            sender_verify_key: None,
         }
     }
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn peer_addr() -> SocketAddr {
-        "127.0.0.1:4672".parse().unwrap()
+    fn sender_addr() -> SocketAddr {
+        "1.2.3.4:4672".parse().unwrap()
+    }
+
+    fn receiver_addr() -> SocketAddr {
+        "5.6.7.8:4672".parse().unwrap()
     }
 
     #[test]
-    fn test_encrypt_decrypt_roundtrip() {
-        let peer_key = 0xCAFE_BABEu32;
-        let peer_addr = peer_addr();
+    fn test_verify_key_derivation_is_stable_and_non_zero() {
+        let layer = ObfuscationLayer::new(NodeId::from_bytes([0x11; 16]), 0xCAFE_BABE, true);
+        let ip: Ipv4Addr = "5.6.7.8".parse().unwrap();
+        assert_eq!(layer.verify_key_for_ip(ip), layer.verify_key_for_ip(ip));
+        assert_ne!(layer.verify_key_for_ip(ip), 0);
+    }
 
-        // sender_layer: obfuscation for the sender (doesn't need our_key, it encrypts outbound).
-        // It registers the peer's UDP key so it can encrypt toward peer_addr.
-        // The receiver decrypts using our_key = peer_key (matching what the sender encrypted with).
-        let sender_layer = ObfuscationLayer::new(0, true);
-        sender_layer.register_peer_key(peer_addr, peer_key);
+    #[test]
+    fn test_encrypt_decrypt_roundtrip_with_node_id_mode() {
+        let sender = ObfuscationLayer::new(NodeId::from_bytes([0x11; 16]), 0x1234_5678, true);
+        let receiver = ObfuscationLayer::new(NodeId::from_bytes([0x22; 16]), 0x8765_4321, true);
+        sender.register_peer_identity(receiver_addr(), receiver.our_node_id);
 
-        // receiver: uses our_key = peer_key so it can derive the same RC4 key.
-        let receiver = ObfuscationLayer::new(peer_key, true);
-
-        // A plaintext Kad2 packet (starts with OP_KADEMLIAHEADER 0xE4)
-        let plaintext = vec![OP_KADEMLIAHEADER, 0x60]; // Ping packet
-
-        let encrypted = sender_layer.encrypt(peer_addr, &plaintext);
+        let plaintext = vec![OP_KADEMLIAHEADER, opcode::SEARCH_KEY_REQ, 0xAA, 0xBB];
+        let encrypted = sender.encrypt(receiver_addr(), opcode::SEARCH_KEY_REQ, &plaintext);
         assert_ne!(encrypted, plaintext);
-        assert!(encrypted.len() > 4);
-        assert_eq!(encrypted[2], 0xD1);
+        assert_ne!(encrypted[0], OP_KADEMLIAHEADER);
 
-        let (decrypted, was_obfuscated) = receiver.decrypt(&encrypted);
-        assert!(was_obfuscated);
-        assert_eq!(decrypted, plaintext);
+        let decrypted = receiver.decrypt(sender_addr(), &encrypted);
+        assert!(decrypted.was_obfuscated);
+        assert_eq!(decrypted.data, plaintext);
+        assert_eq!(
+            decrypted.sender_verify_key,
+            Some(sender.verify_key_for_ip(match receiver_addr().ip() {
+                IpAddr::V4(ip) => ip,
+                IpAddr::V6(_) => unreachable!(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip_with_receiver_key_mode() {
+        let sender = ObfuscationLayer::new(NodeId::from_bytes([0x33; 16]), 0x1020_3040, true);
+        let receiver = ObfuscationLayer::new(NodeId::from_bytes([0x44; 16]), 0x5566_7788, true);
+        let sender_ip = match sender_addr().ip() {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => unreachable!(),
+        };
+        sender.register_peer_key(receiver_addr(), receiver.verify_key_for_ip(sender_ip));
+
+        let plaintext = vec![OP_KADEMLIAHEADER, opcode::PONG, 0x01, 0x02];
+        let encrypted = sender.encrypt(receiver_addr(), opcode::PONG, &plaintext);
+        assert_ne!(encrypted, plaintext);
+        assert_eq!(encrypted[0] & 0x03, KAD_MARKER_RECEIVER_KEY);
+
+        let decrypted = receiver.decrypt(sender_addr(), &encrypted);
+        assert!(decrypted.was_obfuscated);
+        assert_eq!(decrypted.data, plaintext);
     }
 
     #[test]
     fn test_decrypt_plaintext_unchanged() {
-        let layer = ObfuscationLayer::new(0xABCD_1234, true);
-        // Plaintext packet (no 0xD1 at byte 2)
-        let plain = vec![OP_KADEMLIAHEADER, 0x60, 0x00, 0x00];
-        let (out, was_obfuscated) = layer.decrypt(&plain);
-        assert!(!was_obfuscated);
-        assert_eq!(out, plain);
-    }
-
-    #[test]
-    fn test_decrypt_garbage_unchanged() {
-        let layer = ObfuscationLayer::new(0x1234, true);
-        // Has 0xD1 at byte 2 but decryption won't yield OP_KADEMLIAHEADER
-        let garbage = vec![0x01u8, 0x02, 0xD1, 0x00, 0xFF, 0xFE, 0xFD];
-        let (out, was_obfuscated) = layer.decrypt(&garbage);
-        assert!(!was_obfuscated);
-        assert_eq!(out, garbage);
+        let layer = ObfuscationLayer::new(NodeId::from_bytes([0x11; 16]), 0xABCD_1234, true);
+        let plain = vec![OP_KADEMLIAHEADER, opcode::PING, 0x00, 0x00];
+        let decrypted = layer.decrypt(sender_addr(), &plain);
+        assert!(!decrypted.was_obfuscated);
+        assert_eq!(decrypted.data, plain);
+        assert_eq!(decrypted.sender_verify_key, None);
     }
 
     #[test]
     fn test_disabled_encrypt_returns_plaintext() {
-        let layer = ObfuscationLayer::new(0xDEAD, false);
-        let peer_addr = peer_addr();
-        layer.register_peer_key(peer_addr, 0xBEEF);
-        let plaintext = vec![OP_KADEMLIAHEADER, 0x60];
-        let out = layer.encrypt(peer_addr, &plaintext);
-        assert_eq!(out, plaintext);
-    }
-
-    #[test]
-    fn test_encrypt_no_peer_key_returns_plaintext() {
-        let layer = ObfuscationLayer::new(0xDEAD, true);
-        let peer_addr = peer_addr();
-        // No peer key registered
-        let plaintext = vec![OP_KADEMLIAHEADER, 0x61];
-        let out = layer.encrypt(peer_addr, &plaintext);
-        assert_eq!(out, plaintext);
+        let layer = ObfuscationLayer::new(NodeId::from_bytes([0x11; 16]), 0xDEAD_BEEF, false);
+        let plaintext = vec![OP_KADEMLIAHEADER, opcode::PING];
+        assert_eq!(
+            layer.encrypt(receiver_addr(), opcode::PING, &plaintext),
+            plaintext
+        );
     }
 }

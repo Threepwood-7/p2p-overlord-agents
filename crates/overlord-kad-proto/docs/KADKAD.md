@@ -202,13 +202,13 @@ Use the labels below when reading the current port status:
 |---|---|---|
 | `overlord-kad-proto` | `Equivalent behavior` + `Verified difference` | `src/packet.rs` matches the oracle Kad2 search-family wire shapes used by eMule `net/KademliaUDPListener.cpp Process_KADEMLIA2_SEARCH_*` and `kademlia/Search.cpp CSearch::StorePacket`, cross-checked against aMule `Process2Search*Request` and `CSearch::StorePacket`. The remaining semantic-name gaps are `SearchRes.keyword_id` and `PublishNotesReq.note_hash`; source publish now uses a target-generic sender identity field. |
 | `overlord-kad-routing` | `Equivalent behavior` + `Verified difference` + `Pending parity gap` | `src/table.rs` already matches the oracle global duplicate limits from eMule/aMule `routing/RoutingBin.cpp CheckGlobalIPLimits`, but `src/zone.rs fn can_split` does not match `routing/RoutingZone.cpp CanSplit`, and `src/bin.rs` still lacks the oracle per-bin two-per-`/24` cap enforced in `routing/RoutingBin.cpp AddContact`. |
-| `overlord-kad-net` | `Equivalent behavior` + `Verified difference` + `Pending parity gap` | `src/rpc.rs` and the transport flow are close enough for Kad2 request/response exchange, but `src/obfuscation.rs` still uses SHA256 even though eMule/aMule `kademlia/Prefs.cpp GetUDPVerifyKey` use MD5-based derivation. `src/tracker.rs` also remains a generic per-IP limiter instead of the oracle per-IP, per-opcode logic in `net/PacketTracking.cpp`. |
+| `overlord-kad-net` | `Equivalent behavior` + `Verified difference` + `Pending parity gap` | `src/rpc.rs` and the transport flow are close enough for Kad2 request/response exchange, but live-oracle traces show that eMule spends most of its Kad time on obfuscated UDP and only falls back to plaintext sparingly. `src/tracker.rs` also remains a generic per-IP limiter instead of the oracle per-IP, per-opcode logic in `net/PacketTracking.cpp`. |
 | `overlord-kad-dht` | `Equivalent behavior` + `Repo policy` | `src/traversal.rs` emits the same Kad2 search request families as oracle `CSearch::StorePacket`, and the main search/source/notes traversal shape is recognizable. `src/search.rs is_acceptable_keyword_result` is currently repo policy rather than a direct oracle port, and source publish now fills the second `KADEMLIA2_PUBLISH_SOURCE_REQ` field with publisher identity like eMule/aMule. |
 | `overlord-agent-emule` | `Equivalent behavior` + `Verified difference` + `Pending parity gap` | `src/agent.rs` already observes unsolicited Kad `Search*Req` traffic and persists the snoop queue, but coordinator-triggered notes search still fails with `notes search is not wired yet`. `src/snoop_queue.rs` keeps only target-centric queue entries, so passive replay cannot yet preserve oracle request details such as restrictive keyword expressions, source pagination, or notes size-only semantics. |
 
 ### Current Oracle Findings Backlog
 
-1. `overlord-kad-net`: fix obfuscation key derivation to match eMule `kademlia/Prefs.cpp GetUDPVerifyKey` and the aMule equivalent. This is the highest-risk protocol mismatch because it affects live interop and makes the current obfuscation implementation explicitly non-oracle.
+1. `overlord-kad-net`: finish the oracle obfuscation port and verify it on the live network. The recent `a1`-`a7` eMule packet captures under `ext-deps/eMule_full_build_deps/eMule/srchybrid/x64/Debug/` show that modern oracle sessions are overwhelmingly obfuscated, while plaintext Kad appears only as a small bootstrap, hello, or fallback slice.
 2. `overlord-kad-proto`: rename remaining misleading target/identity fields such as `SearchRes.keyword_id` and `PublishNotesReq.note_hash` so the Rust API stops encoding the wrong mental model.
 3. `overlord-kad-routing`: port the real `routing/RoutingZone.cpp CanSplit` rule and the per-bin `/24` clustering cap from `routing/RoutingBin.cpp AddContact` so routing behavior matches eMule/aMule under load.
 4. `overlord-agent-emule` and `overlord-kad-dht`: wire active notes search end to end and decide whether snoop replay must preserve oracle request-shape fields for keyword/source/notes traffic.
@@ -413,7 +413,7 @@ Most modern nodes on the live network use obfuscation. Without it, many nodes wi
 
 - Default: **enabled**
 - Config: `[obfuscation] enabled = true`
-- When enabled: the current Rust runtime obfuscates outbound packets only when a peer UDP key is known; otherwise it falls back to plain packets. Inbound packets are tried as obfuscated first, then plain if decrypt fails.
+- When enabled: the current Rust runtime now follows the oracle Kad UDP key schedule more closely. Request packets prefer NodeID-based obfuscation, reply packets prefer the receiver verify key learned from prior obfuscated traffic, and inbound packets are tried as obfuscated first before falling back to plain decode.
 - When disabled: plain packets only (useful for debugging, Wireshark capture)
 
 ### Key Negotiation
@@ -427,9 +427,15 @@ The obfuscation protocol is poorly documented. The authoritative implementation 
 `eMule: KademliaUDPListener.cpp` and `aMule: KademliaUDPListener.cpp`.
 libed2k also implements it in `dht_tracker.cpp`.
 
-- `Verified difference`: `crates/overlord-kad-net/src/obfuscation.rs derive_key` still uses SHA256 over `(seed0, seed1, udp_key)`, and the file itself already calls this out as a temporary choice.
-- eMule `kademlia/Prefs.cpp GetUDPVerifyKey` and the aMule equivalent use MD5-based verify-key derivation, and those keys are the oracle source for UDP obfuscation state.
-- Treat the current Rust obfuscation as useful live-network interop work, not as completed oracle parity.
+### Oracle Trace Notes
+
+Recent oracle packet captures from the prepared eMule debug workspace support the source reading above:
+
+- `a3.pcapng` and `a4.pcapng`: clean eMule-only startup traces show almost no plaintext Kad traffic beyond bootstrap and hello. No plaintext search or publish traffic dominates those sessions.
+- `a5.pcapng`: active keyword searches still did not surface plaintext `SEARCH_KEY_REQ`, which strongly suggests the real search flow stayed obfuscated end to end.
+- `a6.pcapng` and `a7.pcapng`: eMule did receive visible `PUBLISH_RES` acknowledgements for plaintext fallback `PUBLISH_SOURCE_REQ`, proving that publish acks exist on the oracle, even though most of the session remained obfuscated.
+
+The combined oracle conclusion is that live Kad interoperability depends more on transport-shape parity than on a plaintext-only packet comparison. A Rust node that stays mostly plaintext will not look like the oracle on the network, even if individual packet layouts are otherwise close.
 
 ---
 

@@ -115,7 +115,11 @@ impl DhtNode {
         }
 
         let transport = UdpTransport::bind(config.bind_addr).await?;
-        let obfuscation = ObfuscationLayer::new(config.udp_key, config.obfuscation_enabled);
+        let obfuscation = ObfuscationLayer::new(
+            config.node_id,
+            config.udp_key,
+            config.obfuscation_enabled,
+        );
         let rpc = RpcManager::new(
             transport,
             obfuscation,
@@ -189,6 +193,9 @@ impl DhtNode {
 
     /// Upsert a single contact into the routing table.
     pub async fn add_contact(&self, contact: Contact) -> Result<(), DhtError> {
+        self.inner
+            .rpc
+            .register_peer_identity(addr_from_contact(&contact), contact.id);
         self.inner.routing_table.lock().await.add_contact(contact)?;
         Ok(())
     }
@@ -255,6 +262,9 @@ impl DhtNode {
                             entry.tcp_port,
                             entry.version,
                         );
+                        self.inner
+                            .rpc
+                            .register_peer_identity(addr_from_contact(&contact), contact.id);
                         let _ = rt.add_contact(contact);
                     }
                     info!(
@@ -328,6 +338,9 @@ impl DhtNode {
                     contact.addr.port(), // use same port for tcp as fallback
                     contact.version,
                 );
+                self.inner
+                    .rpc
+                    .register_peer_identity(addr_from_contact(&c), c.id);
                 let _ = rt.add_contact(c);
             }
         }
@@ -551,4 +564,8 @@ impl DhtNode {
 
         contacts
     }
+}
+
+fn addr_from_contact(contact: &Contact) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(contact.ip), contact.udp_port)
 }

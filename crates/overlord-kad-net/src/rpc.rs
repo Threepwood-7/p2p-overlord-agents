@@ -1,5 +1,5 @@
 use crate::error::NetError;
-use crate::obfuscation::ObfuscationLayer;
+use crate::obfuscation::{DecryptResult, ObfuscationLayer};
 use crate::rate_limit::RateLimiter;
 use crate::tracker::PacketTracker;
 use crate::transport::Transport;
@@ -104,7 +104,14 @@ impl RpcManager {
                         }
 
                         // 2. Obfuscation decrypt
-                        let (plain, was_obfuscated) = inner.obfuscation.decrypt(&data);
+                        let DecryptResult {
+                            data: plain,
+                            was_obfuscated,
+                            sender_verify_key,
+                        } = inner.obfuscation.decrypt(from, &data);
+                        if let Some(sender_verify_key) = sender_verify_key {
+                            inner.obfuscation.register_peer_key(from, sender_verify_key);
+                        }
                         debug!("packet from {} was_obfuscated={}", from, was_obfuscated);
 
                         // 3. Parse packet
@@ -115,6 +122,10 @@ impl RpcManager {
                                 continue;
                             }
                         };
+
+                        if let Some(peer_id) = peer_identity_from_packet(&packet) {
+                            inner.obfuscation.register_peer_identity(from, peer_id);
+                        }
 
                         let response_opcode = packet.opcode();
 
@@ -229,7 +240,7 @@ impl RpcManager {
     pub async fn send(&self, addr: SocketAddr, packet: &KadPacket) -> Result<(), NetError> {
         self.inner.rate_limiter.acquire().await;
         let encoded = packet.encode()?;
-        let wire = self.inner.obfuscation.encrypt(addr, &encoded);
+        let wire = self.inner.obfuscation.encrypt(addr, packet.opcode(), &encoded);
         self.inner.transport.send_raw(addr, &wire).await
     }
 
@@ -247,6 +258,21 @@ impl RpcManager {
     /// Register a peer's UDP key after a successful HELLO exchange.
     pub fn register_peer_key(&self, addr: SocketAddr, key: u32) {
         self.inner.obfuscation.register_peer_key(addr, key);
+    }
+
+    /// Register a peer's Kad node ID for NodeID-based request obfuscation.
+    pub fn register_peer_identity(&self, addr: SocketAddr, node_id: overlord_kad_proto::NodeId) {
+        self.inner.obfuscation.register_peer_identity(addr, node_id);
+    }
+}
+
+fn peer_identity_from_packet(packet: &KadPacket) -> Option<overlord_kad_proto::NodeId> {
+    match packet {
+        KadPacket::BootstrapRes(res) => Some(res.sender_id),
+        KadPacket::HelloReq(req) => Some(req.node_id),
+        KadPacket::HelloRes(res) => Some(res.node_id),
+        KadPacket::SearchRes(res) => Some(res.sender_id),
+        _ => None,
     }
 }
 
@@ -270,12 +296,12 @@ mod tests {
 
     fn make_rpc(config: RpcConfig) -> RpcManager {
         let transport = MockTransport::new(make_local_addr());
-        let obfuscation = ObfuscationLayer::new(0, false);
+        let obfuscation = ObfuscationLayer::new(overlord_kad_proto::NodeId::ZERO, 0, false);
         RpcManager::new(transport, obfuscation, config)
     }
 
     fn make_rpc_with_transport(transport: MockTransport) -> RpcManager {
-        let obfuscation = ObfuscationLayer::new(0, false);
+        let obfuscation = ObfuscationLayer::new(overlord_kad_proto::NodeId::ZERO, 0, false);
         RpcManager::new(transport, obfuscation, RpcConfig::default())
     }
 
@@ -373,7 +399,7 @@ mod tests {
         let inject_tx = transport.injector();
         let rpc = RpcManager::new(
             transport,
-            ObfuscationLayer::new(0, false),
+            ObfuscationLayer::new(overlord_kad_proto::NodeId::ZERO, 0, false),
             RpcConfig {
                 max_inbound_per_ip: 20,
                 flood_window: Duration::from_secs(1),

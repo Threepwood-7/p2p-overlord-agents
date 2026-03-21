@@ -14,6 +14,7 @@ rand = { workspace = true }
 bytes = { workspace = true }
 sha2 = "0.10"
 async-trait = "0.1"
+md5 = "0.7"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
