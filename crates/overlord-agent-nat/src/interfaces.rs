@@ -40,7 +40,7 @@ pub enum InterfaceSelectionState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterfaceBindingSelection {
-    pub selected_interface_name: Option<String>,
+    pub bind_iface: Option<String>,
     pub bind_ip: Option<String>,
     pub selection_confirmed: bool,
 }
@@ -48,7 +48,7 @@ pub struct InterfaceBindingSelection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterfaceBindingReport {
     pub recommended_interface_name: Option<String>,
-    pub selected_interface_name: Option<String>,
+    pub bind_iface: Option<String>,
     pub resolved_bind_ip: Option<String>,
     pub selection_confirmed: bool,
     pub ready: bool,
@@ -58,7 +58,7 @@ pub struct InterfaceBindingReport {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedInterfaceBindingReport {
-    pub selected_interface_name: Option<String>,
+    pub bind_iface: Option<String>,
     pub bind_ip: Option<String>,
     pub recommended_interface_name: Option<String>,
     pub selection_confirmed: bool,
@@ -76,18 +76,53 @@ pub struct AgentNetworkReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentNatConfig {
+pub struct AgentControlConfig {
+    pub bind_iface: Option<String>,
+    pub bind_ip: Option<String>,
+    pub selection_confirmed: bool,
+    pub listen_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentKadConfig {
+    pub listen_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEd2kConfig {
+    pub listen_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentP2pConfig {
+    pub bind_iface: Option<String>,
+    pub bind_ip: Option<String>,
+    pub selection_confirmed: bool,
+    pub kad: AgentKadConfig,
+    pub ed2k: AgentEd2kConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentNatP2pConfig {
     pub enabled: bool,
     #[serde(default)]
     pub backend_order: Vec<String>,
     pub igd_ip: Option<String>,
+    pub discovery_timeout_secs: u64,
+    pub lease_duration_secs: u32,
+    pub renew_margin_secs: u64,
     pub external_ip_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentNatConfig {
+    pub p2p: AgentNatP2pConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentNetworkingConfig {
-    pub control: InterfaceBindingSelection,
-    pub p2p: InterfaceBindingSelection,
+    pub control: AgentControlConfig,
+    pub p2p: AgentP2pConfig,
     pub nat: AgentNatConfig,
 }
 
@@ -95,17 +130,20 @@ pub fn detect_interfaces() -> Result<Vec<AgentInterface>> {
     let mut by_name = HashMap::<String, AgentInterface>::new();
     for iface in get_if_addrs()? {
         let description = platform_description(&iface.name);
-        let entry = by_name.entry(iface.name.clone()).or_insert_with(|| AgentInterface {
-            name: iface.name.clone(),
-            description,
-            addresses: Vec::new(),
-            is_loopback: iface.is_loopback(),
-            is_vpn_candidate: is_vpn_like(&iface.name),
-            has_default_route: false,
-        });
+        let entry = by_name
+            .entry(iface.name.clone())
+            .or_insert_with(|| AgentInterface {
+                name: iface.name.clone(),
+                description,
+                addresses: Vec::new(),
+                is_loopback: iface.is_loopback(),
+                is_vpn_candidate: is_vpn_like(&iface.name),
+                has_default_route: false,
+            });
         entry.is_vpn_candidate =
             entry.is_vpn_candidate || entry.description.as_deref().is_some_and(is_vpn_like);
-        entry.has_default_route = entry.has_default_route || platform_has_default_route(&iface.name);
+        entry.has_default_route =
+            entry.has_default_route || platform_has_default_route(&iface.name);
         match iface.addr {
             IfAddr::V4(v4) => entry.addresses.push(AgentInterfaceAddress {
                 family: InterfaceAddressFamily::Ipv4,
@@ -129,7 +167,9 @@ pub fn recommend_interface(interfaces: &[AgentInterface]) -> Option<String> {
         .find(|iface| iface.is_vpn_candidate && iface.addresses.iter().any(is_ipv4_address))
         .or_else(|| {
             interfaces.iter().find(|iface| {
-                iface.has_default_route && !iface.is_loopback && iface.addresses.iter().any(is_ipv4_address)
+                iface.has_default_route
+                    && !iface.is_loopback
+                    && iface.addresses.iter().any(is_ipv4_address)
             })
         })
         .or_else(|| {
@@ -142,13 +182,13 @@ pub fn recommend_interface(interfaces: &[AgentInterface]) -> Option<String> {
 
 pub fn resolve_bind_ip(
     interfaces: &[AgentInterface],
-    selected_interface_name: Option<&str>,
+    bind_iface: Option<&str>,
     bind_ip_override: Option<&str>,
 ) -> Option<String> {
     if let Some(bind_ip) = bind_ip_override.filter(|ip| !ip.trim().is_empty()) {
         return Some(bind_ip.to_string());
     }
-    let selected_name = selected_interface_name?;
+    let selected_name = bind_iface?;
     interfaces
         .iter()
         .find(|iface| iface.name == selected_name)
@@ -166,7 +206,7 @@ pub fn build_interface_binding_report(
 ) -> InterfaceBindingReport {
     InterfaceBindingReport {
         recommended_interface_name: binding.recommended_interface_name.clone(),
-        selected_interface_name: binding.selected_interface_name.clone(),
+        bind_iface: binding.bind_iface.clone(),
         resolved_bind_ip: binding.bind_ip.clone(),
         selection_confirmed: binding.selection_confirmed,
         ready: binding.ready,
@@ -226,7 +266,12 @@ fn platform_has_default_route(interface_name: &str) -> bool {
         .into_iter()
         .flatten()
         .find(|adapter| adapter.adapter_name() == interface_name)
-        .is_some_and(|adapter| adapter.gateways().iter().any(|gateway| *gateway != IpAddr::from([0, 0, 0, 0])))
+        .is_some_and(|adapter| {
+            adapter
+                .gateways()
+                .iter()
+                .any(|gateway| *gateway != IpAddr::from([0, 0, 0, 0]))
+        })
 }
 
 #[cfg(not(windows))]
@@ -237,8 +282,9 @@ fn platform_has_default_route(_interface_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentInterface, AgentInterfaceAddress, InterfaceAddressFamily, ResolvedInterfaceBindingReport,
-        build_interface_binding_report, recommend_interface, resolve_bind_ip,
+        AgentInterface, AgentInterfaceAddress, InterfaceAddressFamily,
+        ResolvedInterfaceBindingReport, build_interface_binding_report, recommend_interface,
+        resolve_bind_ip,
     };
 
     fn iface(name: &str, vpn: bool, default_route: bool, ip: &str) -> AgentInterface {
@@ -284,7 +330,7 @@ mod tests {
     #[test]
     fn build_interface_binding_report_preserves_selection_state() {
         let binding = ResolvedInterfaceBindingReport {
-            selected_interface_name: Some("hide.me".to_string()),
+            bind_iface: Some("hide.me".to_string()),
             bind_ip: Some("10.10.10.2".to_string()),
             recommended_interface_name: Some("hide.me".to_string()),
             selection_confirmed: true,
@@ -294,7 +340,7 @@ mod tests {
         };
         let report = build_interface_binding_report(&binding);
         assert!(report.ready);
-        assert_eq!(report.selected_interface_name.as_deref(), Some("hide.me"));
+        assert_eq!(report.bind_iface.as_deref(), Some("hide.me"));
         assert_eq!(report.resolved_bind_ip.as_deref(), Some("10.10.10.2"));
     }
 }

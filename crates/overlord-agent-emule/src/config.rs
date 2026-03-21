@@ -1,43 +1,57 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
-use overlord_agent_nat::NatConfig;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmuleAgentConfig {
     pub coordinator: CoordinatorConfig,
     pub agent: AgentConfig,
-    pub kad: KadConfig,
+    pub control: ControlConfig,
+    pub p2p: P2pConfig,
     pub nat: NatConfig,
     pub log: LogConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CoordinatorConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
-    pub bind_addr: String,
-    pub control_selected_interface_name: Option<String>,
-    pub control_selection_confirmed: bool,
-    pub control_bind_ip: Option<String>,
     pub indexer_id_path: String,
     pub state_dir: String,
     pub hostname: String,
     pub version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ControlConfig {
+    pub bind_iface: Option<String>,
+    pub bind_ip: Option<String>,
+    pub selection_confirmed: bool,
+    pub listen_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct P2pConfig {
+    pub bind_iface: Option<String>,
+    pub bind_ip: Option<String>,
+    pub selection_confirmed: bool,
+    pub kad: KadConfig,
+    pub ed2k: Ed2kConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KadConfig {
-    pub udp_bind_addr: String,
-    pub ed2k_bind_addr: String,
+    pub listen_port: u16,
     pub nodes_dat_path: String,
     pub bootstrap_nodes: Vec<String>,
     pub search_timeout_secs: u64,
@@ -52,7 +66,31 @@ pub struct KadConfig {
     pub enable_mock_results: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ed2kConfig {
+    pub listen_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NatConfig {
+    pub p2p: NatP2pConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NatP2pConfig {
+    pub enabled: bool,
+    pub backend_order: Vec<String>,
+    pub igd_ip: Option<String>,
+    pub discovery_timeout_secs: u64,
+    pub lease_duration_secs: u32,
+    pub renew_margin_secs: u64,
+    pub external_ip_override: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
     pub level: String,
@@ -63,7 +101,8 @@ impl Default for EmuleAgentConfig {
         Self {
             coordinator: CoordinatorConfig::default(),
             agent: AgentConfig::default(),
-            kad: KadConfig::default(),
+            control: ControlConfig::default(),
+            p2p: P2pConfig::default(),
             nat: NatConfig::default(),
             log: LogConfig::default(),
         }
@@ -81,10 +120,6 @@ impl Default for CoordinatorConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:13301".to_string(),
-            control_selected_interface_name: None,
-            control_selection_confirmed: false,
-            control_bind_ip: None,
             indexer_id_path: "./runtime/overlord-agent-emule.indexer-id".to_string(),
             state_dir: "./runtime".to_string(),
             hostname: "localhost".to_string(),
@@ -93,11 +128,33 @@ impl Default for AgentConfig {
     }
 }
 
+impl Default for ControlConfig {
+    fn default() -> Self {
+        Self {
+            bind_iface: None,
+            bind_ip: None,
+            selection_confirmed: false,
+            listen_port: 13_301,
+        }
+    }
+}
+
+impl Default for P2pConfig {
+    fn default() -> Self {
+        Self {
+            bind_iface: None,
+            bind_ip: None,
+            selection_confirmed: false,
+            kad: KadConfig::default(),
+            ed2k: Ed2kConfig::default(),
+        }
+    }
+}
+
 impl Default for KadConfig {
     fn default() -> Self {
         Self {
-            udp_bind_addr: "0.0.0.0:41000".to_string(),
-            ed2k_bind_addr: "0.0.0.0:41001".to_string(),
+            listen_port: 41_000,
             nodes_dat_path: "./runtime/overlord-kad.nodes.dat".to_string(),
             bootstrap_nodes: Vec::new(),
             search_timeout_secs: 45,
@@ -110,6 +167,34 @@ impl Default for KadConfig {
             notes_result_cap: 1_000,
             obfuscation_enabled: true,
             enable_mock_results: false,
+        }
+    }
+}
+
+impl Default for Ed2kConfig {
+    fn default() -> Self {
+        Self { listen_port: 41_001 }
+    }
+}
+
+impl Default for NatConfig {
+    fn default() -> Self {
+        Self {
+            p2p: NatP2pConfig::default(),
+        }
+    }
+}
+
+impl Default for NatP2pConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend_order: vec!["upnp".to_string()],
+            igd_ip: None,
+            discovery_timeout_secs: 5,
+            lease_duration_secs: 3_600,
+            renew_margin_secs: 300,
+            external_ip_override: None,
         }
     }
 }
@@ -131,17 +216,26 @@ impl EmuleAgentConfig {
             .with_context(|| format!("failed to read config from {}", path.display()))?;
         let mut config: Self = toml::from_str(&contents)
             .with_context(|| format!("failed to parse config from {}", path.display()))?;
-        normalize_agent_config(&mut config.agent);
+        normalize_control_config(&mut config.control);
+        normalize_p2p_config(&mut config.p2p);
         normalize_nat_config(&mut config.nat);
         Ok(config)
     }
 }
 
-fn normalize_agent_config(config: &mut AgentConfig) {
-    for value in [
-        &mut config.control_selected_interface_name,
-        &mut config.control_bind_ip,
-    ] {
+fn normalize_control_config(config: &mut ControlConfig) {
+    for value in [&mut config.bind_iface, &mut config.bind_ip] {
+        if value
+            .as_deref()
+            .is_some_and(|inner| inner.trim().is_empty())
+        {
+            *value = None;
+        }
+    }
+}
+
+fn normalize_p2p_config(config: &mut P2pConfig) {
+    for value in [&mut config.bind_iface, &mut config.bind_ip] {
         if value
             .as_deref()
             .is_some_and(|inner| inner.trim().is_empty())
@@ -152,12 +246,7 @@ fn normalize_agent_config(config: &mut AgentConfig) {
 }
 
 fn normalize_nat_config(config: &mut NatConfig) {
-    for value in [
-        &mut config.selected_interface_name,
-        &mut config.bind_ip,
-        &mut config.igd_ip,
-        &mut config.external_ip_override,
-    ] {
+    for value in [&mut config.p2p.igd_ip, &mut config.p2p.external_ip_override] {
         if value
             .as_deref()
             .is_some_and(|inner| inner.trim().is_empty())
@@ -169,37 +258,52 @@ fn normalize_nat_config(config: &mut NatConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentConfig, NatConfig, normalize_agent_config, normalize_nat_config};
+    use super::{
+        ControlConfig, NatConfig, NatP2pConfig, P2pConfig, normalize_control_config,
+        normalize_nat_config, normalize_p2p_config,
+    };
 
     #[test]
     fn normalize_nat_config_drops_blank_optional_fields() {
         let mut config = NatConfig {
-            selected_interface_name: Some(" ".to_string()),
-            bind_ip: Some(" ".to_string()),
-            igd_ip: Some(String::new()),
-            external_ip_override: Some("\t".to_string()),
-            ..NatConfig::default()
+            p2p: NatP2pConfig {
+                igd_ip: Some(String::new()),
+                external_ip_override: Some("\t".to_string()),
+                ..NatP2pConfig::default()
+            },
         };
 
         normalize_nat_config(&mut config);
 
-        assert_eq!(config.selected_interface_name, None);
-        assert_eq!(config.bind_ip, None);
-        assert_eq!(config.igd_ip, None);
-        assert_eq!(config.external_ip_override, None);
+        assert_eq!(config.p2p.igd_ip, None);
+        assert_eq!(config.p2p.external_ip_override, None);
     }
 
     #[test]
-    fn normalize_agent_config_drops_blank_optional_fields() {
-        let mut config = AgentConfig {
-            control_selected_interface_name: Some(" ".to_string()),
-            control_bind_ip: Some("\t".to_string()),
-            ..AgentConfig::default()
+    fn normalize_control_config_drops_blank_optional_fields() {
+        let mut config = ControlConfig {
+            bind_iface: Some(" ".to_string()),
+            bind_ip: Some("\t".to_string()),
+            ..ControlConfig::default()
         };
 
-        normalize_agent_config(&mut config);
+        normalize_control_config(&mut config);
 
-        assert_eq!(config.control_selected_interface_name, None);
-        assert_eq!(config.control_bind_ip, None);
+        assert_eq!(config.bind_iface, None);
+        assert_eq!(config.bind_ip, None);
+    }
+
+    #[test]
+    fn normalize_p2p_config_drops_blank_optional_fields() {
+        let mut config = P2pConfig {
+            bind_iface: Some(" ".to_string()),
+            bind_ip: Some("\t".to_string()),
+            ..P2pConfig::default()
+        };
+
+        normalize_p2p_config(&mut config);
+
+        assert_eq!(config.bind_iface, None);
+        assert_eq!(config.bind_ip, None);
     }
 }

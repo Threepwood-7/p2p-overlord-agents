@@ -5,7 +5,8 @@ pub mod types;
 
 pub use client::CoordinatorClient;
 pub use overlord_agent_nat::{
-    AgentInterface, AgentInterfaceAddress, AgentNatConfig, AgentNetworkReport, AgentNetworkingConfig,
+    AgentControlConfig, AgentEd2kConfig, AgentInterface, AgentInterfaceAddress, AgentKadConfig,
+    AgentNatConfig, AgentNatP2pConfig, AgentNetworkReport, AgentNetworkingConfig, AgentP2pConfig,
     InterfaceAddressFamily, InterfaceBindingReport, InterfaceBindingSelection,
     InterfaceSelectionState, MappedEndpoint, MappingExposure, MappingSpec, NatConfig, NatStatus,
     NatStatusSnapshot, ResolvedInterfaceBindingReport, SelectedGateway, TransportProtocol,

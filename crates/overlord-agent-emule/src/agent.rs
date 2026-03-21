@@ -16,12 +16,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use md4::{Digest, Md4};
 use overlord_agent_nat::{
-    AgentInterface, AgentNatConfig, AgentNetworkReport, AgentNetworkingConfig,
-    InterfaceBindingSelection,
-    InterfaceSelectionState,
-    MappingExposure, MappingSpec, NatCapableAgent, NatManager, NatManagerBuilder,
-    ResolvedInterfaceBindingReport, RupnpPortMappingProvider, TransportProtocol,
-    build_interface_binding_report, detect_interfaces, recommend_interface, resolve_bind_ip,
+    AgentControlConfig, AgentEd2kConfig, AgentInterface, AgentKadConfig, AgentNatConfig,
+    AgentNatP2pConfig, AgentNetworkReport, AgentNetworkingConfig, AgentP2pConfig,
+    InterfaceBindingSelection, InterfaceSelectionState, MappingExposure, MappingSpec,
+    NatCapableAgent, NatManager, NatManagerBuilder, ResolvedInterfaceBindingReport,
+    RupnpPortMappingProvider, TransportProtocol, build_interface_binding_report,
+    detect_interfaces, recommend_interface, resolve_bind_ip,
 };
 use tokio::{
     sync::{Mutex, Notify, RwLock},
@@ -46,7 +46,7 @@ use overlord_kad_proto::{
 };
 use overlord_kad_routing::Contact;
 
-use crate::config::{EmuleAgentConfig, KadConfig};
+use crate::config::EmuleAgentConfig;
 
 const ACTIVE_BATCH_SIZE: usize = 25;
 const PASSIVE_BATCH_SIZE: usize = 50;
@@ -179,43 +179,71 @@ impl OverlordAgentEmule {
 
     fn control_selection(config: &EmuleAgentConfig) -> InterfaceBindingSelection {
         InterfaceBindingSelection {
-            selected_interface_name: config.agent.control_selected_interface_name.clone(),
-            bind_ip: config.agent.control_bind_ip.clone(),
-            selection_confirmed: config.agent.control_selection_confirmed,
+            bind_iface: config.control.bind_iface.clone(),
+            bind_ip: config.control.bind_ip.clone(),
+            selection_confirmed: config.control.selection_confirmed,
         }
     }
 
     fn p2p_selection(config: &EmuleAgentConfig) -> InterfaceBindingSelection {
         InterfaceBindingSelection {
-            selected_interface_name: config.nat.selected_interface_name.clone(),
-            bind_ip: config.nat.bind_ip.clone(),
-            selection_confirmed: config.nat.selection_confirmed,
+            bind_iface: config.p2p.bind_iface.clone(),
+            bind_ip: config.p2p.bind_ip.clone(),
+            selection_confirmed: config.p2p.selection_confirmed,
+        }
+    }
+
+    fn control_config(config: &EmuleAgentConfig) -> AgentControlConfig {
+        AgentControlConfig {
+            bind_iface: config.control.bind_iface.clone(),
+            bind_ip: config.control.bind_ip.clone(),
+            selection_confirmed: config.control.selection_confirmed,
+            listen_port: config.control.listen_port,
+        }
+    }
+
+    fn p2p_config(config: &EmuleAgentConfig) -> AgentP2pConfig {
+        AgentP2pConfig {
+            bind_iface: config.p2p.bind_iface.clone(),
+            bind_ip: config.p2p.bind_ip.clone(),
+            selection_confirmed: config.p2p.selection_confirmed,
+            kad: AgentKadConfig {
+                listen_port: config.p2p.kad.listen_port,
+            },
+            ed2k: AgentEd2kConfig {
+                listen_port: config.p2p.ed2k.listen_port,
+            },
         }
     }
 
     fn desired_nat_config(config: &EmuleAgentConfig) -> AgentNatConfig {
         AgentNatConfig {
-            enabled: config.nat.enabled,
-            backend_order: if config.nat.backend_order.is_empty() {
-                vec!["upnp".to_string()]
-            } else {
-                config.nat.backend_order.clone()
+            p2p: AgentNatP2pConfig {
+                enabled: config.nat.p2p.enabled,
+                backend_order: if config.nat.p2p.backend_order.is_empty() {
+                    vec!["upnp".to_string()]
+                } else {
+                    config.nat.p2p.backend_order.clone()
+                },
+                igd_ip: config.nat.p2p.igd_ip.clone(),
+                discovery_timeout_secs: config.nat.p2p.discovery_timeout_secs,
+                lease_duration_secs: config.nat.p2p.lease_duration_secs,
+                renew_margin_secs: config.nat.p2p.renew_margin_secs,
+                external_ip_override: config.nat.p2p.external_ip_override.clone(),
             },
-            igd_ip: config.nat.igd_ip.clone(),
-            external_ip_override: config.nat.external_ip_override.clone(),
         }
     }
 
     fn networking_config(config: &EmuleAgentConfig) -> AgentNetworkingConfig {
         AgentNetworkingConfig {
-            control: Self::control_selection(config),
-            p2p: Self::p2p_selection(config),
+            control: Self::control_config(config),
+            p2p: Self::p2p_config(config),
             nat: Self::desired_nat_config(config),
         }
     }
 
     fn bootstrap_control_bind_addr(config: &EmuleAgentConfig) -> Result<SocketAddr> {
-        resolved_socket_addr(&config.agent.bind_addr, None).context("invalid agent.bind_addr")
+        resolved_socket_addr(config.control.listen_port, None)
     }
 
     fn startup_control_bind_addr(config: &EmuleAgentConfig) -> Result<SocketAddr> {
@@ -224,7 +252,7 @@ impl OverlordAgentEmule {
         if selection.selection_confirmed {
             if let Some(bind_ip) = resolve_bind_ip(
                 &interfaces,
-                selection.selected_interface_name.as_deref(),
+                selection.bind_iface.as_deref(),
                 selection.bind_ip.as_deref(),
             ) {
                 return Self::selected_control_bind_addr(config, Some(&bind_ip));
@@ -235,7 +263,7 @@ impl OverlordAgentEmule {
     }
 
     fn selected_control_bind_addr(config: &EmuleAgentConfig, bind_ip: Option<&str>) -> Result<SocketAddr> {
-        resolved_socket_addr(&config.agent.bind_addr, bind_ip).context("invalid agent.bind_addr")
+        resolved_socket_addr(config.control.listen_port, bind_ip)
     }
 
     fn resolve_binding_state(
@@ -248,7 +276,7 @@ impl OverlordAgentEmule {
         let recommended_interface_name = recommend_interface(interfaces);
         let resolved_bind_ip = resolve_bind_ip(
             interfaces,
-            selection.selected_interface_name.as_deref(),
+            selection.bind_iface.as_deref(),
             selection.bind_ip.as_deref(),
         );
 
@@ -268,7 +296,7 @@ impl OverlordAgentEmule {
         };
 
         ResolvedInterfaceBindingReport {
-            selected_interface_name: selection.selected_interface_name,
+            bind_iface: selection.bind_iface,
             bind_ip: resolved_bind_ip,
             recommended_interface_name,
             selection_confirmed: selection.selection_confirmed,
@@ -365,10 +393,10 @@ impl OverlordAgentEmule {
     }
 
     fn nat_mappings_from_config(config: &EmuleAgentConfig, bind_ip: Option<&str>) -> Result<Vec<MappingSpec>> {
-        let kad_addr = resolved_socket_addr(&config.kad.udp_bind_addr, bind_ip)
-            .context("invalid kad.udp_bind_addr for NAT mapping")?;
-        let ed2k_addr = resolved_socket_addr(&config.kad.ed2k_bind_addr, bind_ip)
-            .context("invalid kad.ed2k_bind_addr for NAT mapping")?;
+        let kad_addr = resolved_socket_addr(config.p2p.kad.listen_port, bind_ip)
+            .context("invalid p2p.kad.listen_port for NAT mapping")?;
+        let ed2k_addr = resolved_socket_addr(config.p2p.ed2k.listen_port, bind_ip)
+            .context("invalid p2p.ed2k.listen_port for NAT mapping")?;
 
         Ok(vec![
             MappingSpec {
@@ -442,8 +470,8 @@ impl OverlordAgentEmule {
             && control_bind_addr.is_some_and(|bind_addr| {
                 resolve_bind_ip(
                     &interfaces,
-                    config.agent.control_selected_interface_name.as_deref(),
-                    config.agent.control_bind_ip.as_deref(),
+                    config.control.bind_iface.as_deref(),
+                    config.control.bind_ip.as_deref(),
                 )
                 .is_some_and(|resolved_ip| bind_addr.ip().to_string() == resolved_ip)
             });
@@ -533,36 +561,46 @@ impl OverlordAgentEmule {
     ) -> Result<AgentNetworkRuntime> {
         let node_id = load_or_create_node_id(&self.state_paths.node_id_path)?;
         let udp_key = load_or_create_udp_key(&self.state_paths.udp_key_path)?;
-        let bind_addr = resolved_socket_addr(&config.kad.udp_bind_addr, Some(bind_ip))
-            .context("invalid kad.udp_bind_addr")?;
+        let bind_addr = resolved_socket_addr(config.p2p.kad.listen_port, Some(bind_ip))
+            .context("invalid p2p.kad.listen_port")?;
         let nodes_dat = read_optional_bytes(&self.state_paths.nodes_dat_path)?;
-        let nodes_text =
-            (!config.kad.bootstrap_nodes.is_empty()).then(|| config.kad.bootstrap_nodes.join("\n"));
+        let nodes_text = (!config.p2p.kad.bootstrap_nodes.is_empty())
+            .then(|| config.p2p.kad.bootstrap_nodes.join("\n"));
 
         let dht = DhtNode::new(DhtConfig {
             bind_addr,
             node_id,
             max_routing_table_size: 12_000,
             max_concurrent_searches: 5,
-            search_timeout: Duration::from_secs(config.kad.search_timeout_secs),
-            store_timeout: Duration::from_secs(config.kad.store_timeout_secs),
-            republish_interval: Duration::from_secs(config.kad.republish_interval_secs),
-            max_outbound_pps: config.kad.max_outbound_pps,
-            search_phase2_fanout: config.kad.search_phase2_fanout,
-            keyword_result_cap: config.kad.keyword_result_cap,
-            source_result_cap: config.kad.source_result_cap,
-            notes_result_cap: config.kad.notes_result_cap,
-            obfuscation_enabled: config.kad.obfuscation_enabled,
+            search_timeout: Duration::from_secs(config.p2p.kad.search_timeout_secs),
+            store_timeout: Duration::from_secs(config.p2p.kad.store_timeout_secs),
+            republish_interval: Duration::from_secs(config.p2p.kad.republish_interval_secs),
+            max_outbound_pps: config.p2p.kad.max_outbound_pps,
+            search_phase2_fanout: config.p2p.kad.search_phase2_fanout,
+            keyword_result_cap: config.p2p.kad.keyword_result_cap,
+            source_result_cap: config.p2p.kad.source_result_cap,
+            notes_result_cap: config.p2p.kad.notes_result_cap,
+            obfuscation_enabled: config.p2p.kad.obfuscation_enabled,
             udp_key,
             nodes_dat,
             nodes_text,
         })
         .await?;
 
-        let mut nat_config = config.nat.clone();
-        if nat_config.bind_ip.is_none() {
-            nat_config.bind_ip = Some(bind_ip.to_string());
-        }
+        let nat_config = overlord_agent_nat::NatConfig {
+            enabled: config.nat.p2p.enabled,
+            backend_order: if config.nat.p2p.backend_order.is_empty() {
+                vec!["upnp".to_string()]
+            } else {
+                config.nat.p2p.backend_order.clone()
+            },
+            bind_ip: Some(bind_ip.to_string()),
+            igd_ip: config.nat.p2p.igd_ip.clone(),
+            discovery_timeout_secs: config.nat.p2p.discovery_timeout_secs,
+            lease_duration_secs: config.nat.p2p.lease_duration_secs,
+            renew_margin_secs: config.nat.p2p.renew_margin_secs,
+            external_ip_override: config.nat.p2p.external_ip_override.clone(),
+        };
 
         let nat = Arc::new(
             NatManagerBuilder::new(nat_config)
@@ -619,7 +657,7 @@ async fn do_active_keyword_search(
             .await?;
     }
 
-    if seen == 0 && config.read().await.kad.enable_mock_results {
+    if seen == 0 && config.read().await.p2p.kad.enable_mock_results {
         callback_client
             .post_results(&ResultBatch {
                 job_id: Some(job.job_id),
@@ -703,17 +741,14 @@ fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     })?))
 }
 
-fn resolved_socket_addr(bind_addr: &str, bind_ip: Option<&str>) -> Result<SocketAddr> {
-    let mut addr: SocketAddr = bind_addr
-        .parse()
-        .with_context(|| format!("invalid bind address {bind_addr}"))?;
-    if let Some(bind_ip) = bind_ip {
-        let ip = bind_ip
+fn resolved_socket_addr(listen_port: u16, bind_ip: Option<&str>) -> Result<SocketAddr> {
+    let ip = match bind_ip {
+        Some(bind_ip) => bind_ip
             .parse::<IpAddr>()
-            .with_context(|| format!("invalid bind ip {bind_ip}"))?;
-        addr = SocketAddr::new(ip, addr.port());
-    }
-    Ok(addr)
+            .with_context(|| format!("invalid bind ip {bind_ip}"))?,
+        None => IpAddr::from([0, 0, 0, 0]),
+    };
+    Ok(SocketAddr::new(ip, listen_port))
 }
 
 fn load_or_create_indexer_id(path: &str) -> Result<Uuid> {
@@ -1146,10 +1181,10 @@ mod tests {
 impl AgentStatePaths {
     fn from_config(config: &EmuleAgentConfig) -> Self {
         let state_dir = PathBuf::from(&config.agent.state_dir);
-        let nodes_dat_path = if config.kad.nodes_dat_path.trim().is_empty() {
+        let nodes_dat_path = if config.p2p.kad.nodes_dat_path.trim().is_empty() {
             state_dir.join("overlord-kad.nodes.dat")
         } else {
-            PathBuf::from(&config.kad.nodes_dat_path)
+            PathBuf::from(&config.p2p.kad.nodes_dat_path)
         };
         Self {
             node_id_path: state_dir.join("overlord-kad.node-id"),
@@ -1162,40 +1197,54 @@ impl AgentStatePaths {
 
 fn empty_networking_config() -> AgentNetworkingConfig {
     AgentNetworkingConfig {
-        control: InterfaceBindingSelection {
-            selected_interface_name: None,
+        control: AgentControlConfig {
+            bind_iface: None,
             bind_ip: None,
             selection_confirmed: false,
+            listen_port: 13_301,
         },
-        p2p: InterfaceBindingSelection {
-            selected_interface_name: None,
+        p2p: AgentP2pConfig {
+            bind_iface: None,
             bind_ip: None,
             selection_confirmed: false,
+            kad: AgentKadConfig { listen_port: 41_000 },
+            ed2k: AgentEd2kConfig { listen_port: 41_001 },
         },
         nat: AgentNatConfig {
-            enabled: false,
-            backend_order: vec!["upnp".to_string()],
-            igd_ip: None,
-            external_ip_override: None,
+            p2p: AgentNatP2pConfig {
+                enabled: false,
+                backend_order: vec!["upnp".to_string()],
+                igd_ip: None,
+                discovery_timeout_secs: 5,
+                lease_duration_secs: 3_600,
+                renew_margin_secs: 300,
+                external_ip_override: None,
+            },
         },
     }
 }
 
 fn apply_networking_config(config: &mut EmuleAgentConfig, desired: &AgentNetworkingConfig) {
-    config.agent.control_selected_interface_name = desired.control.selected_interface_name.clone();
-    config.agent.control_bind_ip = desired.control.bind_ip.clone();
-    config.agent.control_selection_confirmed = desired.control.selection_confirmed;
-    config.nat.selected_interface_name = desired.p2p.selected_interface_name.clone();
-    config.nat.bind_ip = desired.p2p.bind_ip.clone();
-    config.nat.selection_confirmed = desired.p2p.selection_confirmed;
-    config.nat.enabled = desired.nat.enabled;
-    config.nat.backend_order = if desired.nat.backend_order.is_empty() {
+    config.control.bind_iface = desired.control.bind_iface.clone();
+    config.control.bind_ip = desired.control.bind_ip.clone();
+    config.control.selection_confirmed = desired.control.selection_confirmed;
+    config.control.listen_port = desired.control.listen_port;
+    config.p2p.bind_iface = desired.p2p.bind_iface.clone();
+    config.p2p.bind_ip = desired.p2p.bind_ip.clone();
+    config.p2p.selection_confirmed = desired.p2p.selection_confirmed;
+    config.p2p.kad.listen_port = desired.p2p.kad.listen_port;
+    config.p2p.ed2k.listen_port = desired.p2p.ed2k.listen_port;
+    config.nat.p2p.enabled = desired.nat.p2p.enabled;
+    config.nat.p2p.backend_order = if desired.nat.p2p.backend_order.is_empty() {
         vec!["upnp".to_string()]
     } else {
-        desired.nat.backend_order.clone()
+        desired.nat.p2p.backend_order.clone()
     };
-    config.nat.igd_ip = desired.nat.igd_ip.clone();
-    config.nat.external_ip_override = desired.nat.external_ip_override.clone();
+    config.nat.p2p.igd_ip = desired.nat.p2p.igd_ip.clone();
+    config.nat.p2p.discovery_timeout_secs = desired.nat.p2p.discovery_timeout_secs;
+    config.nat.p2p.lease_duration_secs = desired.nat.p2p.lease_duration_secs;
+    config.nat.p2p.renew_margin_secs = desired.nat.p2p.renew_margin_secs;
+    config.nat.p2p.external_ip_override = desired.nat.p2p.external_ip_override.clone();
 }
 
 fn load_persisted_networking_config(config: &mut EmuleAgentConfig) -> Result<()> {
@@ -1237,7 +1286,20 @@ impl NatCapableAgent for OverlordAgentEmule {
     fn nat_config(&self) -> overlord_agent_nat::NatConfig {
         self.config
             .try_read()
-            .map(|config| config.nat.clone())
+            .map(|config| overlord_agent_nat::NatConfig {
+                enabled: config.nat.p2p.enabled,
+                backend_order: if config.nat.p2p.backend_order.is_empty() {
+                    vec!["upnp".to_string()]
+                } else {
+                    config.nat.p2p.backend_order.clone()
+                },
+                bind_ip: config.p2p.bind_ip.clone(),
+                igd_ip: config.nat.p2p.igd_ip.clone(),
+                discovery_timeout_secs: config.nat.p2p.discovery_timeout_secs,
+                lease_duration_secs: config.nat.p2p.lease_duration_secs,
+                renew_margin_secs: config.nat.p2p.renew_margin_secs,
+                external_ip_override: config.nat.p2p.external_ip_override.clone(),
+            })
             .unwrap_or_default()
     }
 
@@ -1245,7 +1307,7 @@ impl NatCapableAgent for OverlordAgentEmule {
         self.config
             .try_read()
             .ok()
-            .and_then(|config| Self::nat_mappings_from_config(&config, config.nat.bind_ip.as_deref()).ok())
+            .and_then(|config| Self::nat_mappings_from_config(&config, config.p2p.bind_ip.as_deref()).ok())
             .unwrap_or_default()
     }
 }
@@ -1331,98 +1393,16 @@ impl IndexerService for OverlordAgentEmule {
     }
 
     async fn apply_config(&self, config: ConfigUpdate) -> Result<()> {
-        #[derive(serde::Deserialize)]
-        struct NatConfigUpdate {
-            selected_interface_name: Option<Option<String>>,
-            bind_ip: Option<Option<String>>,
-            selection_confirmed: Option<bool>,
-            enabled: Option<bool>,
-            igd_ip: Option<Option<String>>,
-            external_ip_override: Option<Option<String>>,
-        }
-
-        #[derive(serde::Deserialize)]
-        #[serde(untagged)]
-        enum NatUpdate {
-            Desired(AgentNatConfig),
-            Legacy(NatConfigUpdate),
-        }
-
-        #[derive(serde::Deserialize)]
-        struct LiveConfigUpdate {
-            kad: Option<KadConfig>,
-            control: Option<InterfaceBindingSelection>,
-            p2p: Option<InterfaceBindingSelection>,
-            nat: Option<NatUpdate>,
-        }
-
-        let next: LiveConfigUpdate = serde_json::from_value(config.config)
+        let next: AgentNetworkingConfig = serde_json::from_value(config.config)
             .context("invalid config payload for overlord-agent-emule")?;
         let mut guard = self.config.write().await;
-        let old_control = Self::control_selection(&guard);
-        let old_p2p = Self::p2p_selection(&guard);
-        let old_nat = Self::desired_nat_config(&guard);
-        let kad_changed = next.kad.is_some();
-        if let Some(kad) = next.kad {
-            guard.kad = kad;
-        }
-        if let Some(control) = next.control {
-            guard.agent.control_selected_interface_name = control.selected_interface_name;
-            guard.agent.control_bind_ip = control.bind_ip;
-            guard.agent.control_selection_confirmed = control.selection_confirmed;
-        }
-        if let Some(p2p) = next.p2p {
-            guard.nat.selected_interface_name = p2p.selected_interface_name;
-            guard.nat.bind_ip = p2p.bind_ip;
-            guard.nat.selection_confirmed = p2p.selection_confirmed;
-        }
-        if let Some(nat) = next.nat {
-            match nat {
-                NatUpdate::Desired(nat) => {
-                    guard.nat.enabled = nat.enabled;
-                    guard.nat.backend_order = if nat.backend_order.is_empty() {
-                        vec!["upnp".to_string()]
-                    } else {
-                        nat.backend_order
-                    };
-                    guard.nat.igd_ip = nat.igd_ip;
-                    guard.nat.external_ip_override = nat.external_ip_override;
-                }
-                NatUpdate::Legacy(nat) => {
-                    if let Some(selected_interface_name) = nat.selected_interface_name {
-                        guard.nat.selected_interface_name = selected_interface_name;
-                    }
-                    if let Some(bind_ip) = nat.bind_ip {
-                        guard.nat.bind_ip = bind_ip;
-                    }
-                    if let Some(selection_confirmed) = nat.selection_confirmed {
-                        guard.nat.selection_confirmed = selection_confirmed;
-                    }
-                    if let Some(enabled) = nat.enabled {
-                        guard.nat.enabled = enabled;
-                    }
-                    if let Some(igd_ip) = nat.igd_ip {
-                        guard.nat.igd_ip = igd_ip;
-                    }
-                    if let Some(external_ip_override) = nat.external_ip_override {
-                        guard.nat.external_ip_override = external_ip_override;
-                    }
-                }
-            }
-        }
-        let new_control = Self::control_selection(&guard);
-        let new_p2p = Self::p2p_selection(&guard);
-        let new_nat = Self::desired_nat_config(&guard);
+        let old_networking = Self::networking_config(&guard);
+        apply_networking_config(&mut guard, &next);
         let new_networking = Self::networking_config(&guard);
         drop(guard);
-        let networking_changed = old_control != new_control || old_p2p != new_p2p || old_nat != new_nat;
-        if networking_changed {
+        if old_networking != new_networking {
             persist_networking_config(&self.state_paths, &new_networking)?;
             self.request_restart();
-            return Ok(());
-        }
-        if kad_changed {
-            self.reconcile_runtime().await?;
         }
         Ok(())
     }
@@ -1555,7 +1535,7 @@ impl OverlordAgentEmule {
         let coordinator = self.coordinator.clone();
         let dht = runtime.dht.clone();
         let shutdown = Arc::clone(&runtime.shutdown);
-        let republish_secs = config.kad.republish_interval_secs;
+        let republish_secs = config.p2p.kad.republish_interval_secs;
         runtime.tasks.lock().await.push(tokio::spawn(async move {
             while !shutdown.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_secs(republish_secs)).await;
