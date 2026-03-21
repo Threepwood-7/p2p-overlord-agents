@@ -182,6 +182,13 @@ Repo policy:
 - the current Overlord Kad runtime currently sends `0` only
 - expression payloads and start-position pagination are still pending work
 
+Oracle anchors:
+
+- eMule `srchybrid/kademlia/net/KademliaUDPListener.cpp Process_KADEMLIA2_SEARCH_KEY_REQ`
+- eMule `srchybrid/kademlia/kademlia/Search.cpp CSearch::StorePacket`
+- aMule `src/kademlia/net/KademliaUDPListener.cpp Process2SearchKeyRequest`
+- aMule `src/kademlia/kademlia/Search.cpp CSearch::StorePacket`
+
 ### `KADEMLIA2_SEARCH_SOURCE_REQ` (`0x34`)
 
 Purpose:
@@ -207,6 +214,13 @@ Repo policy:
 - if the file is unknown to the current indexing plane or indexed as size `0`, the request should fail early
 - `start_position` currently stays `0`
 
+Oracle anchors:
+
+- eMule `srchybrid/kademlia/net/KademliaUDPListener.cpp Process_KADEMLIA2_SEARCH_SOURCE_REQ`
+- eMule `srchybrid/kademlia/kademlia/Search.cpp CSearch::StorePacket`
+- aMule `src/kademlia/net/KademliaUDPListener.cpp Process2SearchSourceRequest`
+- aMule `src/kademlia/kademlia/Search.cpp CSearch::StorePacket`
+
 ### `KADEMLIA2_SEARCH_NOTES_REQ` (`0x35`)
 
 Purpose:
@@ -230,12 +244,19 @@ Repo policy:
 - the node resolves size from the local index
 - unknown or zero-size entries are rejected before any Kad packet is sent
 
+Oracle anchors:
+
+- eMule `srchybrid/kademlia/net/KademliaUDPListener.cpp Process_KADEMLIA2_SEARCH_NOTES_REQ`
+- eMule `srchybrid/kademlia/kademlia/Search.cpp CSearch::StorePacket`
+- aMule `src/kademlia/net/KademliaUDPListener.cpp Process2SearchNotesRequest`
+- aMule `src/kademlia/kademlia/Search.cpp CSearch::StorePacket`
+
 ### `KADEMLIA2_SEARCH_RES` (`0x3B`)
 
 Purpose:
 - carries search results for keyword, source, and notes searches
 
-Verified wire layout used by this repo:
+Verified eMule/aMule wire layout matched by this repo:
 
 | Field | Size | Meaning |
 |---|---:|---|
@@ -263,6 +284,17 @@ Important repo note:
 - the Rust struct currently names the echoed target field `keyword_id`
 - that name is narrower than the wire reality
 - for source and notes searches it is still the echoed file-hash target, not a keyword-only concept
+
+Oracle anchors:
+
+- eMule `srchybrid/kademlia/net/KademliaUDPListener.cpp Process_KADEMLIA2_SEARCH_RES`
+- eMule `srchybrid/kademlia/kademlia/Indexed.cpp SendValidKeywordResult`
+- eMule `srchybrid/kademlia/kademlia/Indexed.cpp SendValidSourceResult`
+- eMule `srchybrid/kademlia/kademlia/Indexed.cpp SendValidNoteResult`
+- aMule `src/kademlia/net/KademliaUDPListener.cpp Process2SearchResponse`
+- aMule `src/kademlia/kademlia/Indexed.cpp SendValidKeywordResult`
+- aMule `src/kademlia/kademlia/Indexed.cpp SendValidSourceResult`
+- aMule `src/kademlia/kademlia/Indexed.cpp SendValidNoteResult`
 
 ### `KADEMLIA2_PUBLISH_KEY_REQ` (`0x43`)
 
@@ -303,7 +335,8 @@ Important caution:
 
 - the current Rust field name is `source_hash`
 - eMule uses the sender's client hash in this position, not the file hash again
-- the exact naming and end-to-end parity of this field still deserves a focused follow-up audit
+- `crates/overlord-kad-dht/src/publish.rs` currently fills this field from the file hash parameter
+- this is a `Verified difference`, not just naming drift
 
 ### `KADEMLIA2_PUBLISH_NOTES_REQ` (`0x45`)
 
@@ -323,7 +356,8 @@ Important caution:
 
 - the current Rust field name is `note_hash`
 - eMule writes the publisher Kad ID here
-- this naming mismatch is outside the scope of the current search-fix pass
+- the current Rust public API still implies a note-hash style value even though the oracle semantics are publisher identity
+- end-to-end notes publish parity is still `Pending`
 
 ### `KADEMLIA2_PUBLISH_RES` (`0x4B`)
 
@@ -336,6 +370,13 @@ Layout:
 |---|---:|---|
 | `target` | 16 | echoed publish target |
 | `load` | 1 | remote-side load / acceptance hint |
+
+### Search And Publish Runtime Notes
+
+- `Verified`: restrictive keyword mode is not just a flag bit. Oracle receive paths immediately parse a trailing search-expression tree via `CreateSearchExpressionTree` when `start_position & 0x8000 != 0`.
+- `Equivalent behavior, different implementation`: both eMule and aMule may emit multiple `KADEMLIA2_SEARCH_RES` packets for one request. eMule `kademlia/Indexed.cpp SendValid*Result` fragments on byte budget, while aMule `kademlia/Indexed.cpp SendValid*Result` sends fixed 50-result chunks.
+- `Verified difference (oracles)`: `net/PacketTracking.cpp` is not identical for publish opcodes. eMule allows 4/3/2 requests per minute for publish key/source/notes; aMule allows 3/2/2.
+- `Pending parity gap (Rust runtime)`: `crates/overlord-kad-net/src/rpc.rs` and `crates/overlord-kad-net/src/tracker.rs` currently apply generic per-IP flood blocking instead of oracle per-IP, per-opcode request tracking.
 
 ## 5. Verified Tag Registry For Search And Publish
 
@@ -689,11 +730,23 @@ Use this section first when re-auditing a protocol area.
   - Kad2 UDP opcodes
   - Kad search/publish tag IDs
   - `FT_FILESIZE_HI`
+- `c:\prj\p2p\eMule-my\deps-repos\eMule\srchybrid\kademlia\net\KademliaUDPListener.cpp`
+  - search request parsing
+  - search response parsing
+  - HELLO / firewall / UDP-key handling
 - `c:\prj\p2p\eMule-my\deps-repos\eMule\srchybrid\kademlia\kademlia\Search.cpp`
   - search request serialization
   - search result parsing
   - publish request serialization
   - source type semantics
+- `c:\prj\p2p\eMule-my\deps-repos\eMule\srchybrid\kademlia\kademlia\Indexed.cpp`
+  - `SEARCH_RES` emission
+  - search result batching
+  - keyword/source/notes result limits
+- `c:\prj\p2p\eMule-my\deps-repos\eMule\srchybrid\kademlia\net\PacketTracking.cpp`
+  - per-opcode inbound request throttling
+- `c:\prj\p2p\eMule-my\deps-repos\eMule\srchybrid\kademlia\kademlia\Prefs.cpp`
+  - UDP verify key derivation
 - `c:\prj\p2p\eMule-my\deps-repos\eMule\srchybrid\kademlia\kademlia\SearchManager.cpp`
   - keyword preparation and duplicate-search policy
 - `c:\prj\p2p\eMule-my\deps-repos\eMule\srchybrid\kademlia\kademlia\Defines.h`
@@ -705,8 +758,17 @@ Use this section first when re-auditing a protocol area.
   - Kad2 UDP opcode cross-check
 - `c:\prj\p2p\amule\src\include\tags\FileTags.h`
   - Kad search/publish tag IDs
+- `c:\prj\p2p\amule\src\kademlia\net\KademliaUDPListener.cpp`
+  - portable cross-check for search/publish parsing
+  - HELLO / firewall / UDP-key handling
 - `c:\prj\p2p\amule\src\kademlia\kademlia\Search.cpp`
   - portable cross-check for search serialization and parsing
+- `c:\prj\p2p\amule\src\kademlia\kademlia\Indexed.cpp`
+  - portable cross-check for `SEARCH_RES` emission
+- `c:\prj\p2p\amule\src\kademlia\net\PacketTracking.cpp`
+  - portable cross-check for inbound request throttling
+- `c:\prj\p2p\amule\src\kademlia\kademlia\Prefs.cpp`
+  - UDP verify key derivation
 
 ### Overlord Kad Implementation
 
@@ -716,8 +778,14 @@ Use this section first when re-auditing a protocol area.
   - Rust wire layouts
 - `crates/overlord-kad-proto/src/tag.rs`
   - tag encode/decode and helper constructors
+- `crates/overlord-kad-net/src/rpc.rs`
+  - current unsolicited packet and flood-tracking policy
+- `crates/overlord-kad-net/src/obfuscation.rs`
+  - current UDP obfuscation implementation
 - `crates/overlord-kad-dht/src/traversal.rs`
   - search-phase request emission
+- `crates/overlord-kad-dht/src/publish.rs`
+  - current publish request emission
 - `crates/overlord-kad-dht/src/types.rs`
   - keyword/source/notes result decoding
 - `crates/overlord-agent-emule/src/agent.rs`
