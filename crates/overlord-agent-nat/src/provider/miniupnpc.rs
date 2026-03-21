@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use miniupnpc::{DiscoveryOptions, Gateway, gateway_from_url};
+use miniupnpc::{DiscoveryOptions, Gateway, PortMappingEntry, gateway_from_url};
 use tokio::{sync::RwLock, task};
 use tracing::debug;
 
@@ -115,23 +115,40 @@ fn reconcile_blocking(
         let external_port = spec
             .preferred_external_port
             .unwrap_or_else(|| spec.local_addr.port());
+        let internal_ip = mapping_internal_ip(config, spec, &local_ip).to_string();
         if let Err(error) = gateway
             .add_port_mapping(
                 external_port,
                 spec.local_addr.port(),
-                &mapping_internal_ip(config, spec, &local_ip).to_string(),
+                &internal_ip,
                 &spec.name,
                 spec.protocol.as_upnp_token(),
                 config.lease_duration_secs,
             )
             .with_context(|| format!("failed to add {} mapping", spec.name))
         {
-            for (protocol, port) in applied.into_iter().rev() {
-                let _ = gateway.delete_port_mapping(port, protocol);
+            if !mapping_matches_existing_entry(
+                &gateway,
+                external_port,
+                spec.protocol.as_upnp_token(),
+                &internal_ip,
+                spec.local_addr.port(),
+            )? {
+                for (protocol, port) in applied.into_iter().rev() {
+                    let _ = gateway.delete_port_mapping(port, protocol);
+                }
+                return Err(error);
             }
-            return Err(error);
+            debug!(
+                "miniupnpc reused existing mapping for {} {} -> {}:{}",
+                spec.protocol.as_upnp_token(),
+                external_port,
+                internal_ip,
+                spec.local_addr.port()
+            );
+        } else {
+            applied.push((spec.protocol.as_upnp_token(), external_port));
         }
-        applied.push((spec.protocol.as_upnp_token(), external_port));
 
         let external_ip = external_ip_text
             .clone()
@@ -255,4 +272,51 @@ fn mapping_internal_ip(
         return ip;
     }
     *gateway_local_ip
+}
+
+fn mapping_matches_existing_entry(
+    gateway: &Gateway,
+    external_port: u16,
+    protocol: &str,
+    expected_internal_ip: &str,
+    expected_internal_port: u16,
+) -> Result<bool> {
+    let Some(entry) = gateway.get_specific_port_mapping(external_port, protocol)? else {
+        return Ok(false);
+    };
+    Ok(existing_mapping_matches(
+        &entry,
+        expected_internal_ip,
+        expected_internal_port,
+    ))
+}
+
+fn existing_mapping_matches(
+    entry: &PortMappingEntry,
+    expected_internal_ip: &str,
+    expected_internal_port: u16,
+) -> bool {
+    entry.internal_client == expected_internal_ip && entry.internal_port == expected_internal_port
+}
+
+#[cfg(test)]
+mod tests {
+    use miniupnpc::PortMappingEntry;
+
+    use super::existing_mapping_matches;
+
+    #[test]
+    fn existing_mapping_match_requires_same_ip_and_port() {
+        let entry = PortMappingEntry {
+            internal_client: "10.54.220.34".to_string(),
+            internal_port: 41000,
+            description: Some("kad".to_string()),
+            enabled: Some(true),
+            lease_duration_secs: Some(3600),
+        };
+
+        assert!(existing_mapping_matches(&entry, "10.54.220.34", 41000));
+        assert!(!existing_mapping_matches(&entry, "10.54.220.35", 41000));
+        assert!(!existing_mapping_matches(&entry, "10.54.220.34", 41001));
+    }
 }

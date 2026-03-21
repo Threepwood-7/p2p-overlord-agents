@@ -25,6 +25,11 @@ const DEFAULT_DEVICE_TYPES: [&str; 6] = [
 const LANADDR_CAPACITY: usize = 64;
 const WANADDR_CAPACITY: usize = 64;
 const EXTERNAL_IP_CAPACITY: usize = 64;
+const MAPPING_CLIENT_CAPACITY: usize = 16;
+const MAPPING_PORT_CAPACITY: usize = 6;
+const MAPPING_DESC_CAPACITY: usize = 80;
+const MAPPING_ENABLED_CAPACITY: usize = 4;
+const MAPPING_LEASE_CAPACITY: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceSearchTarget {
@@ -117,6 +122,20 @@ pub struct Gateway {
     summary: GatewaySummary,
     urls: sys::UPNPUrls,
     data: sys::IGDdatas,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortMappingEntry {
+    /// LAN client currently bound to the external port.
+    pub internal_client: String,
+    /// LAN port currently bound to the external port.
+    pub internal_port: u16,
+    /// Router-side description when one is exposed by the IGD.
+    pub description: Option<String>,
+    /// Whether the mapping is enabled when reported by the IGD.
+    pub enabled: Option<bool>,
+    /// Remaining lease duration in seconds when reported by the IGD.
+    pub lease_duration_secs: Option<u32>,
 }
 
 unsafe impl Send for Gateway {}
@@ -229,6 +248,71 @@ impl Gateway {
             )
         };
         ensure_command_success("UPNP_DeletePortMapping", status)
+    }
+
+    /// Reads the current IGD mapping for a specific external port and protocol.
+    pub fn get_specific_port_mapping(
+        &self,
+        external_port: u16,
+        protocol: &str,
+    ) -> Result<Option<PortMappingEntry>> {
+        let _winsock = WinsockGuard::init()?;
+        let control_url = c_string(&self.summary.control_url, "control_url")?;
+        let service_type = c_string(&self.summary.service_type, "service_type")?;
+        let external_port = CString::new(external_port.to_string()).unwrap();
+        let protocol = c_string(protocol, "protocol")?;
+        let remote_host = CString::new("").unwrap();
+        let mut internal_client = [0 as c_char; MAPPING_CLIENT_CAPACITY];
+        let mut internal_port = [0 as c_char; MAPPING_PORT_CAPACITY];
+        let mut description = [0 as c_char; MAPPING_DESC_CAPACITY];
+        let mut enabled = [0 as c_char; MAPPING_ENABLED_CAPACITY];
+        let mut lease_duration = [0 as c_char; MAPPING_LEASE_CAPACITY];
+
+        let status = unsafe {
+            sys::UPNP_GetSpecificPortMappingEntry(
+                control_url.as_ptr(),
+                service_type.as_ptr(),
+                external_port.as_ptr(),
+                protocol.as_ptr(),
+                remote_host.as_ptr(),
+                internal_client.as_mut_ptr(),
+                internal_port.as_mut_ptr(),
+                description.as_mut_ptr(),
+                enabled.as_mut_ptr(),
+                lease_duration.as_mut_ptr(),
+            )
+        };
+
+        if status == sys::UPNPCOMMAND_SUCCESS {
+            let internal_client = buffer_to_string(&internal_client)
+                .ok_or_else(|| anyhow!("miniupnpc did not return an internal client"))?;
+            let internal_port = buffer_to_string(&internal_port)
+                .ok_or_else(|| anyhow!("miniupnpc did not return an internal port"))?
+                .parse()
+                .context("miniupnpc returned an invalid internal port")?;
+            return Ok(Some(PortMappingEntry {
+                internal_client,
+                internal_port,
+                description: buffer_to_string(&description),
+                enabled: buffer_to_string(&enabled).map(|value| value == "1"),
+                lease_duration_secs: buffer_to_string(&lease_duration)
+                    .map(|value| {
+                        value
+                            .parse()
+                            .context("miniupnpc returned an invalid lease duration")
+                    })
+                    .transpose()?,
+            }));
+        }
+
+        if status == sys::UPNPERR_NO_SUCH_ENTRY_IN_ARRAY {
+            return Ok(None);
+        }
+
+        bail!(
+            "UPNP_GetSpecificPortMappingEntry failed: {}",
+            upnp_error_string(status)
+        )
     }
 }
 

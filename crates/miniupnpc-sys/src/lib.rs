@@ -24,6 +24,7 @@ pub const UPNPCOMMAND_INVALID_ARGS: c_int = -2;
 pub const UPNPCOMMAND_HTTP_ERROR: c_int = -3;
 pub const UPNPCOMMAND_INVALID_RESPONSE: c_int = -4;
 pub const UPNPCOMMAND_MEM_ALLOC_ERROR: c_int = -5;
+pub const UPNPERR_NO_SUCH_ENTRY_IN_ARRAY: c_int = 714;
 
 #[repr(C)]
 pub struct UPNPDev {
@@ -132,6 +133,19 @@ unsafe extern "C" {
         extPort: *const c_char,
         proto: *const c_char,
         remoteHost: *const c_char,
+    ) -> c_int;
+
+    pub fn UPNP_GetSpecificPortMappingEntry(
+        controlURL: *const c_char,
+        servicetype: *const c_char,
+        extPort: *const c_char,
+        proto: *const c_char,
+        remoteHost: *const c_char,
+        intClient: *mut c_char,
+        intPort: *mut c_char,
+        desc: *mut c_char,
+        enabled: *mut c_char,
+        leaseDuration: *mut c_char,
     ) -> c_int;
 
     pub fn FreeUPNPUrls(urls: *mut UPNPUrls);
