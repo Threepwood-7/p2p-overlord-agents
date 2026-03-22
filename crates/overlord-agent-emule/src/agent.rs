@@ -56,6 +56,10 @@ use crate::snoop_queue::SnoopQueue;
 const ACTIVE_BATCH_SIZE: usize = 25;
 const PASSIVE_BATCH_SIZE: usize = 50;
 const BOOTSTRAP_RETRY_SECS: u64 = 30;
+#[cfg(not(test))]
+const COORDINATOR_RECONNECT_SECS: u64 = 30;
+#[cfg(test)]
+const COORDINATOR_RECONNECT_SECS: u64 = 1;
 const SNOOP_FLUSH_SECS: u64 = 30;
 const PASSIVE_CRAWL_SECS: u64 = 45;
 const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
@@ -397,8 +401,7 @@ pub enum AgentExit {
 }
 
 impl OverlordAgentEmule {
-    pub async fn new(mut config: EmuleAgentConfig) -> Result<Self> {
-        load_persisted_networking_config(&mut config)?;
+    pub async fn new(config: EmuleAgentConfig) -> Result<Self> {
         let indexer_id = load_or_create_indexer_id(&config.agent.indexer_id_path)?;
         let coordinator = CoordinatorClient::new(&config.coordinator.url)?;
         let state_paths = AgentStatePaths::from_config(&config);
@@ -456,19 +459,30 @@ impl OverlordAgentEmule {
         let config = self.config.read().await.clone();
         let bind_addr = Self::startup_control_bind_addr(&config)?;
         self.start_control_server_with_retry(bind_addr).await?;
-        self.register_with_coordinator().await?;
-
-        if self.sync_networking_config_from_coordinator().await? {
-            self.stop().await?;
-            self.stop_control_server().await?;
-            return Ok(AgentExit::RestartRequested);
-        }
+        let reconnect_task = match self.connect_to_coordinator().await {
+            Ok(true) => {
+                self.stop().await?;
+                self.stop_control_server().await?;
+                return Ok(AgentExit::RestartRequested);
+            }
+            Ok(false) => None,
+            Err(error) => {
+                warn!(
+                    "coordinator unavailable during startup; continuing with local config: {error}"
+                );
+                Some(Arc::clone(&self).spawn_coordinator_reconnect_task())
+            }
+        };
 
         tokio::select! {
             ctrl_c = tokio::signal::ctrl_c() => {
                 ctrl_c.context("failed while waiting for ctrl-c")?;
             }
             _ = self.restart_notify.notified() => {}
+        }
+        if let Some(task) = reconnect_task {
+            task.abort();
+            let _ = task.await;
         }
         self.stop().await?;
         self.stop_control_server().await?;
@@ -697,6 +711,39 @@ impl OverlordAgentEmule {
         }
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("control server failed to start")))
+    }
+
+    async fn connect_to_coordinator(&self) -> Result<bool> {
+        self.register_with_coordinator().await?;
+        self.sync_networking_config_from_coordinator().await
+    }
+
+    fn spawn_coordinator_reconnect_task(self: Arc<Self>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(COORDINATOR_RECONNECT_SECS)).await;
+                if self.restart_requested.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                match self.connect_to_coordinator().await {
+                    Ok(true) => {
+                        info!(
+                            "reconnected to coordinator and received updated networking config; restarting agent"
+                        );
+                        self.request_restart();
+                        break;
+                    }
+                    Ok(false) => {
+                        info!("reconnected to coordinator; coordinator integration resumed");
+                        break;
+                    }
+                    Err(error) => {
+                        debug!("coordinator reconnect attempt failed: {error}");
+                    }
+                }
+            }
+        })
     }
 
     async fn stop_control_server(&self) -> Result<()> {
@@ -1624,9 +1671,7 @@ async fn handle_unsolicited_packet(
                 if let Some(udp_key) = req.udp_key {
                     contact.udp_key = KadUdpKey::new(udp_key);
                 }
-                let _ = dht
-                    .add_contact(contact)
-                    .await;
+                let _ = dht.add_contact(contact).await;
             }
             let bind_addr = dht.bind_addr()?;
             let tcp_ip = match bind_addr.ip() {
@@ -1657,9 +1702,7 @@ async fn handle_unsolicited_packet(
                 if let Some(udp_key) = res.udp_key {
                     contact.udp_key = KadUdpKey::new(udp_key);
                 }
-                let _ = dht
-                    .add_contact(contact)
-                    .await;
+                let _ = dht.add_contact(contact).await;
             }
             let _ = dht.send_packet(from, &KadPacket::HelloResAck).await;
         }
@@ -1832,28 +1875,6 @@ fn apply_networking_config(config: &mut EmuleAgentConfig, desired: &AgentNetwork
     config.nat.p2p.external_ip_override = desired.nat.p2p.external_ip_override.clone();
 }
 
-fn load_persisted_networking_config(config: &mut EmuleAgentConfig) -> Result<()> {
-    let state_paths = AgentStatePaths::from_config(config);
-    if !state_paths.networking_config_path.exists() {
-        return Ok(());
-    }
-
-    let contents = fs::read_to_string(&state_paths.networking_config_path).with_context(|| {
-        format!(
-            "failed to read networking state from {}",
-            state_paths.networking_config_path.display()
-        )
-    })?;
-    let desired: AgentNetworkingConfig = serde_json::from_str(&contents).with_context(|| {
-        format!(
-            "failed to parse networking state from {}",
-            state_paths.networking_config_path.display()
-        )
-    })?;
-    apply_networking_config(config, &desired);
-    Ok(())
-}
-
 fn persist_networking_config(
     state_paths: &AgentStatePaths,
     desired: &AgentNetworkingConfig,
@@ -1931,7 +1952,11 @@ impl IndexerService for OverlordAgentEmule {
 
     async fn stop(&self) -> Result<()> {
         self.stop_runtime().await?;
-        flush_snoop_queue(&self.coordinator, self.indexer_id, &self.snoop_queue).await?;
+        if let Err(error) =
+            flush_snoop_queue(&self.coordinator, self.indexer_id, &self.snoop_queue).await
+        {
+            warn!("failed to flush snoop queue during shutdown: {error}");
+        }
         Ok(())
     }
 
@@ -2250,25 +2275,38 @@ impl OverlordAgentEmule {
 #[cfg(test)]
 mod tests {
     use super::{
-        EMULE_LARGE_FILE_SIZE_THRESHOLD, EmuleAgentConfig, SYNTHETIC_POPULAR_SEEDS,
-        apply_networking_config, apply_publish_summary, build_publish_batch_summary,
-        empty_networking_config, emule_high_id_source_type, flush_snoop_queue, keyword_target,
-        restore_snoop_queue, select_popular_hashes_for_seeding, significant_keyword_words,
-        synthetic_file_hash, synthetic_popular_hashes,
+        COORDINATOR_RECONNECT_SECS, EMULE_LARGE_FILE_SIZE_THRESHOLD, EmuleAgentConfig,
+        OverlordAgentEmule, SYNTHETIC_POPULAR_SEEDS, apply_networking_config,
+        apply_publish_summary, build_publish_batch_summary, empty_networking_config,
+        emule_high_id_source_type, flush_snoop_queue, keyword_target, restore_snoop_queue,
+        select_popular_hashes_for_seeding, significant_keyword_words, synthetic_file_hash,
+        synthetic_popular_hashes,
     };
     use crate::{config::SnoopQueueConfig, snoop_queue::SnoopQueue};
     use axum::{
         Json, Router,
-        extract::{Path, State},
+        extract::{Path as AxumPath, State},
         routing::{get, post},
     };
     use chrono::{TimeZone, Utc};
     use overlord_agent_common::{
-        CoordinatorClient, HashType, PopularHash, PublishCounters, PublishSeedSource, SnoopEntry,
+        AgentInterfacesView, CoordinatorClient, HashType, IndexerRegistration, IndexerService,
+        PopularHash, Protocol, PublishCounters, PublishSeedSource, RegisterRequest,
+        RegistrationResponse, SnoopEntry,
     };
     use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
     use overlord_kad_dht::PublishAttemptStats;
-    use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+    use std::{
+        collections::HashSet,
+        fs,
+        net::SocketAddr,
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        },
+        time::Duration,
+    };
     use tokio::sync::Mutex;
     use uuid::Uuid;
 
@@ -2276,6 +2314,8 @@ mod tests {
     struct MockCoordinatorState {
         restore_entries: Arc<Vec<SnoopEntry>>,
         flushed_entries: Arc<Mutex<Vec<SnoopEntry>>>,
+        networking_view: Arc<Mutex<Option<AgentInterfacesView>>>,
+        register_calls: Arc<AtomicUsize>,
     }
 
     #[derive(Debug, serde::Deserialize)]
@@ -2285,7 +2325,7 @@ mod tests {
     }
 
     async fn restore_handler(
-        Path(_indexer_id): Path<Uuid>,
+        AxumPath(_indexer_id): AxumPath<Uuid>,
         State(state): State<MockCoordinatorState>,
     ) -> Json<Vec<SnoopEntry>> {
         Json(state.restore_entries.as_ref().clone())
@@ -2304,6 +2344,37 @@ mod tests {
         Json(serde_json::json!({ "accepted": true }))
     }
 
+    async fn register_handler(
+        State(state): State<MockCoordinatorState>,
+        Json(payload): Json<RegisterRequest>,
+    ) -> Json<RegistrationResponse> {
+        state.register_calls.fetch_add(1, AtomicOrdering::Relaxed);
+        Json(RegistrationResponse {
+            registered: IndexerRegistration {
+                indexer_id: payload.indexer_id,
+                protocol: payload.protocol,
+                url: payload.url,
+                hostname: payload.hostname,
+                version: payload.version,
+                registered_at: Utc::now(),
+            },
+        })
+    }
+
+    async fn agent_interfaces_handler(
+        AxumPath(_indexer_id): AxumPath<Uuid>,
+        State(state): State<MockCoordinatorState>,
+    ) -> Json<AgentInterfacesView> {
+        Json(
+            state
+                .networking_view
+                .lock()
+                .await
+                .clone()
+                .expect("networking view should be configured"),
+        )
+    }
+
     async fn spawn_mock_coordinator(
         restore_entries: Vec<SnoopEntry>,
     ) -> (SocketAddr, Arc<Mutex<Vec<SnoopEntry>>>) {
@@ -2311,6 +2382,8 @@ mod tests {
         let state = MockCoordinatorState {
             restore_entries: Arc::new(restore_entries),
             flushed_entries: Arc::clone(&flushed_entries),
+            networking_view: Arc::new(Mutex::new(None)),
+            register_calls: Arc::new(AtomicUsize::new(0)),
         };
         let app = Router::new()
             .route(
@@ -2325,6 +2398,58 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (addr, flushed_entries)
+    }
+
+    async fn spawn_full_mock_coordinator(
+        bind_addr: SocketAddr,
+        view: AgentInterfacesView,
+    ) -> Arc<AtomicUsize> {
+        let register_calls = Arc::new(AtomicUsize::new(0));
+        let state = MockCoordinatorState {
+            restore_entries: Arc::new(Vec::new()),
+            flushed_entries: Arc::new(Mutex::new(Vec::new())),
+            networking_view: Arc::new(Mutex::new(Some(view))),
+            register_calls: Arc::clone(&register_calls),
+        };
+        let app = Router::new()
+            .route("/api/internal/register", post(register_handler))
+            .route(
+                "/api/agents/{indexer_id}/interfaces",
+                get(agent_interfaces_handler),
+            )
+            .route(
+                "/api/internal/snoop-restore/{indexer_id}",
+                get(restore_handler),
+            )
+            .route("/api/internal/snoop-flush", post(flush_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        register_calls
+    }
+
+    fn build_test_config(temp_root: &Path, coordinator_url: String) -> EmuleAgentConfig {
+        let state_dir = temp_root.join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let mut config = EmuleAgentConfig::default();
+        config.coordinator.url = coordinator_url;
+        config.agent.state_dir = state_dir.display().to_string();
+        config.agent.indexer_id_path = state_dir
+            .join("overlord-agent-emule.indexer-id")
+            .display()
+            .to_string();
+        config.control.bind_ip = Some("127.0.0.1".to_string());
+        config.control.selection_confirmed = true;
+        config.control.listen_port = 0;
+        config.p2p.bind_ip = Some("127.0.0.1".to_string());
+        config.p2p.selection_confirmed = true;
+        config.p2p.kad.listen_port = 0;
+        config.p2p.ed2k.listen_port = 0;
+        config.nat.p2p.enabled = false;
+        config
     }
 
     #[test]
@@ -2494,5 +2619,117 @@ mod tests {
 
         let flushed_entries = flushed_entries.lock().await.clone();
         assert_eq!(flushed_entries, vec![restored_entry]);
+    }
+
+    #[tokio::test]
+    async fn start_runs_runtime_without_coordinator() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "overlord-agent-emule-offline-start-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
+        let agent = OverlordAgentEmule::new(config).await.unwrap();
+
+        agent.start().await.unwrap();
+        assert!(agent.runtime.lock().await.is_some());
+        let stats = agent.stats().await.unwrap();
+        assert!(
+            stats
+                .interface_report
+                .as_ref()
+                .is_some_and(|report| report.p2p.ready)
+        );
+
+        agent.stop().await.unwrap();
+        fs::remove_dir_all(&temp_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn serve_continues_when_initial_coordinator_registration_fails() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "overlord-agent-emule-offline-serve-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
+        let agent = Arc::new(OverlordAgentEmule::new(config).await.unwrap());
+        agent.start().await.unwrap();
+
+        let serve_agent = Arc::clone(&agent);
+        let serve_task = tokio::spawn(async move { serve_agent.serve().await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!serve_task.is_finished());
+        serve_task.abort();
+        let _ = serve_task.await;
+
+        fs::remove_dir_all(&temp_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_loop_registers_after_startup_fallback() {
+        let probe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let coordinator_addr = probe_listener.local_addr().unwrap();
+        drop(probe_listener);
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "overlord-agent-emule-reconnect-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = build_test_config(&temp_root, format!("http://{coordinator_addr}"));
+        let networking_view = AgentInterfacesView {
+            registration: IndexerRegistration {
+                indexer_id: Uuid::nil(),
+                protocol: Protocol::Kad2,
+                url: String::new(),
+                hostname: String::new(),
+                version: String::new(),
+                registered_at: Utc::now(),
+            },
+            report: None,
+            config: OverlordAgentEmule::networking_config(&config),
+            nat: None,
+            publish_observability: None,
+            last_error: None,
+        };
+        let agent = Arc::new(OverlordAgentEmule::new(config).await.unwrap());
+        agent.start().await.unwrap();
+
+        let serve_agent = Arc::clone(&agent);
+        let serve_task = tokio::spawn(async move { serve_agent.serve().await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let register_calls = spawn_full_mock_coordinator(coordinator_addr, networking_view).await;
+        tokio::time::timeout(Duration::from_secs(COORDINATOR_RECONNECT_SECS + 2), async {
+            loop {
+                if register_calls.load(AtomicOrdering::Relaxed) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        agent.request_restart();
+        let _ = tokio::time::timeout(Duration::from_secs(5), serve_task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        fs::remove_dir_all(&temp_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_succeeds_when_shutdown_flush_cannot_reach_coordinator() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "overlord-agent-emule-shutdown-flush-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
+        let agent = OverlordAgentEmule::new(config).await.unwrap();
+
+        agent.start().await.unwrap();
+        agent.stop().await.unwrap();
+
+        fs::remove_dir_all(&temp_root).unwrap();
     }
 }

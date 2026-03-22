@@ -270,7 +270,7 @@ impl SnoopEntry {
         match self {
             SnoopEntry::Keyword { first_seen, .. }
             | SnoopEntry::Source { first_seen, .. }
-            | SnoopEntry::Notes { first_seen, .. } => first_seen.clone(),
+            | SnoopEntry::Notes { first_seen, .. } => *first_seen,
         }
     }
 
@@ -287,7 +287,7 @@ impl SnoopEntry {
         match self {
             SnoopEntry::Keyword { last_seen, .. }
             | SnoopEntry::Source { last_seen, .. }
-            | SnoopEntry::Notes { last_seen, .. } => last_seen.clone(),
+            | SnoopEntry::Notes { last_seen, .. } => *last_seen,
         }
     }
 
@@ -310,7 +310,7 @@ impl SnoopEntry {
             }
             | SnoopEntry::Notes {
                 last_drained_at, ..
-            } => last_drained_at.clone(),
+            } => *last_drained_at,
         }
     }
 
