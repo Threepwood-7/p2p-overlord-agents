@@ -2583,13 +2583,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_networking_config_prefers_miniupnpc_then_rupnp() {
+    fn empty_networking_config_prefers_miniupnpc_only() {
         assert_eq!(
             empty_networking_config().nat.p2p.backend_order,
-            vec![
-                UPNP_MINIUPNPC_BACKEND.to_string(),
-                UPNP_RUPNP_BACKEND.to_string()
-            ]
+            vec![UPNP_MINIUPNPC_BACKEND.to_string()]
         );
     }
 

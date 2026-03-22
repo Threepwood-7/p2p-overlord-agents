@@ -15,9 +15,13 @@ mod rupnp;
 
 pub use igd::IgdPortMappingProvider;
 pub use miniupnpc::MiniupnpcPortMappingProvider;
+#[allow(deprecated)]
 pub use rupnp::RupnpPortMappingProvider;
 
 pub const UPNP_MINIUPNPC_BACKEND: &str = "upnp_miniupnpc";
+/// Deprecated frozen backend id kept only for explicit opt-in fallback support.
+///
+/// Do not add new features, behavior changes, or tests for `upnp_rupnp`.
 pub const UPNP_RUPNP_BACKEND: &str = "upnp_rupnp";
 pub const UPNP_IGD_BACKEND: &str = "upnp_igd";
 
@@ -47,12 +51,10 @@ pub trait PortMappingProvider: Send + Sync + 'static {
 }
 
 pub fn default_upnp_backend_order() -> Vec<String> {
-    vec![
-        UPNP_MINIUPNPC_BACKEND.to_string(),
-        UPNP_RUPNP_BACKEND.to_string(),
-    ]
+    vec![UPNP_MINIUPNPC_BACKEND.to_string()]
 }
 
+#[allow(deprecated)]
 pub fn built_in_upnp_port_mapping_providers() -> Vec<Arc<dyn PortMappingProvider>> {
     vec![
         Arc::new(MiniupnpcPortMappingProvider),
@@ -69,13 +71,10 @@ mod tests {
     };
 
     #[test]
-    fn default_upnp_backend_order_prefers_miniupnpc_then_rupnp() {
+    fn default_upnp_backend_order_prefers_miniupnpc_only() {
         assert_eq!(
             default_upnp_backend_order(),
-            vec![
-                UPNP_MINIUPNPC_BACKEND.to_string(),
-                UPNP_RUPNP_BACKEND.to_string()
-            ]
+            vec![UPNP_MINIUPNPC_BACKEND.to_string()]
         );
     }
 

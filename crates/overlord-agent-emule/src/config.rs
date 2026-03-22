@@ -435,13 +435,10 @@ mod tests {
     }
 
     #[test]
-    fn default_nat_config_prefers_miniupnpc_then_rupnp() {
+    fn default_nat_config_prefers_miniupnpc_only() {
         assert_eq!(
             NatP2pConfig::default().backend_order,
-            vec![
-                UPNP_MINIUPNPC_BACKEND.to_string(),
-                UPNP_RUPNP_BACKEND.to_string()
-            ]
+            vec![UPNP_MINIUPNPC_BACKEND.to_string()]
         );
     }
 

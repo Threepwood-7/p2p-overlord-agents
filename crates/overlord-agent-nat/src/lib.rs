@@ -14,6 +14,7 @@ pub use interfaces::{
     detect_interfaces, recommend_interface, resolve_bind_ip,
 };
 pub use manager::{NatManager, NatManagerBuilder};
+#[allow(deprecated)]
 pub use provider::{
     IgdPortMappingProvider, MiniupnpcPortMappingProvider, NatCapableAgent, PortMappingProvider,
     RupnpPortMappingProvider, UPNP_IGD_BACKEND, UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND,

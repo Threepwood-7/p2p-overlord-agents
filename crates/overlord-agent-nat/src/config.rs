@@ -37,16 +37,13 @@ impl Default for NatConfig {
 #[cfg(test)]
 mod tests {
     use super::NatConfig;
-    use crate::provider::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
+    use crate::provider::UPNP_MINIUPNPC_BACKEND;
 
     #[test]
-    fn default_nat_config_prefers_miniupnpc_then_rupnp() {
+    fn default_nat_config_prefers_miniupnpc_only() {
         assert_eq!(
             NatConfig::default().backend_order,
-            vec![
-                UPNP_MINIUPNPC_BACKEND.to_string(),
-                UPNP_RUPNP_BACKEND.to_string()
-            ]
+            vec![UPNP_MINIUPNPC_BACKEND.to_string()]
         );
     }
 }

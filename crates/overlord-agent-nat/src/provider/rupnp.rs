@@ -1,3 +1,8 @@
+//! Deprecated and frozen UPnP backend based on `rupnp`.
+//!
+//! Keep this backend only for explicit opt-in fallback support.
+//! Do not add new features, behavior changes, or new tests in this module.
+
 use std::{
     cmp::Reverse,
     collections::HashSet,
@@ -31,6 +36,12 @@ const WAN_IP_CONNECTION_1: URN = URN::service("schemas-upnp-org", "WANIPConnecti
 const WAN_IP_CONNECTION_2: URN = URN::service("schemas-upnp-org", "WANIPConnection", 2);
 const WAN_PPP_CONNECTION_1: URN = URN::service("schemas-upnp-org", "WANPPPConnection", 1);
 
+/// Deprecated frozen backend retained only for explicit opt-in compatibility.
+///
+/// No further development or new tests should be added for this backend.
+#[deprecated(
+    note = "upnp_rupnp is deprecated and frozen; keep it only for explicit opt-in fallback support"
+)]
 #[derive(Debug, Default)]
 pub struct RupnpPortMappingProvider;
 
@@ -41,6 +52,7 @@ struct GatewayHandle {
 }
 
 #[async_trait]
+#[allow(deprecated)]
 impl PortMappingProvider for RupnpPortMappingProvider {
     fn name(&self) -> &'static str {
         UPNP_RUPNP_BACKEND

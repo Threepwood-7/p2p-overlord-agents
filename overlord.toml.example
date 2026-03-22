@@ -43,7 +43,8 @@ drain_cooldown_secs = 3600
 
 [nat.p2p]
 enabled = false
-backend_order = ["upnp_miniupnpc", "upnp_rupnp"]
+backend_order = ["upnp_miniupnpc"]
+# Deprecated opt-in fallback only: "upnp_rupnp" is frozen and receives no new development.
 igd_ip = ""
 minissdpd_socket = ""
 ssdp_local_port = 0
