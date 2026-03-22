@@ -7,8 +7,8 @@ The first tool is `minirupnpc`, a small NAT/UPnP diagnostic executable built on 
 mapping verification without launching the full agent runtime.
 
 The `upnp_miniupnpc` backend is backed by the local MiniUPnP source tree at
-`c:\prj\p2p\p2p-overlord\ext-deps\c\miniupnp`, and this workspace currently expects that tree to
-be checked out at the `miniupnpc_2_3_3` tag.
+`<workspace>/ext-deps/c/miniupnp`, and this workspace currently expects that tree to be
+checked out at the `miniupnpc_2_3_3` tag.
 
 ## Build
 
