@@ -794,7 +794,7 @@ mod tests {
         let _ = run_search_phase(
             &rpc,
             SearchPhaseConfig {
-                responded: &[contact.clone()],
+                responded: std::slice::from_ref(&contact),
                 kind: TraversalKind::Keyword {
                     request: SearchKeyReq {
                         target,
@@ -849,7 +849,7 @@ mod tests {
         let _ = run_search_phase(
             &rpc,
             SearchPhaseConfig {
-                responded: &[contact.clone()],
+                responded: std::slice::from_ref(&contact),
                 kind: TraversalKind::Keyword {
                     request: restrictive_request.clone(),
                 },

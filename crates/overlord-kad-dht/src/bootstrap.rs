@@ -391,7 +391,7 @@ mod tests {
             udp_key: KadUdpKey::new(0xA1B2_C3D4),
         };
 
-        let data = encode_nodes_dat(&[contact.clone()]).unwrap();
+        let data = encode_nodes_dat(std::slice::from_ref(&contact)).unwrap();
         let parsed = parse_nodes_dat(&data).unwrap();
 
         assert_eq!(parsed.len(), 1);

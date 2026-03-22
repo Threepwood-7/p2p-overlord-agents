@@ -17,7 +17,7 @@ use crate::{
     config::NatConfig,
     provider::PortMappingProvider,
     reachability::ReachabilityStrategy,
-    types::{MappingSpec, NatStatus},
+    types::{MappedEndpoint, MappingSpec, NatStatus},
 };
 
 pub struct NatManagerBuilder {
@@ -129,21 +129,26 @@ impl NatManager {
             task.abort();
         }
 
-        let mappings = self.status.read().await.mappings.clone();
+        let status = self.status.read().await.clone();
+        let mappings = if status.mappings.is_empty() {
+            release_targets_from_specs(&self.mappings, self.config.lease_duration_secs)
+        } else {
+            status.mappings
+        };
         if mappings.is_empty() {
             return Ok(());
         }
 
-        let selected_backend = self.status.read().await.backend.clone();
-        if let Some(provider) = self.providers.iter().find(|provider| {
-            selected_backend
-                .as_deref()
-                .map(|backend| backend == provider.name())
-                .unwrap_or(false)
-        }) {
-            let _ = provider
-                .release(&self.config, &mappings, Arc::clone(&self.status))
-                .await;
+        for backend_name in release_backend_order(&status.backend, &self.config.backend_order) {
+            if let Some(provider) = self
+                .providers
+                .iter()
+                .find(|provider| provider.name() == backend_name.as_str())
+            {
+                let _ = provider
+                    .release(&self.config, &mappings, Arc::clone(&self.status))
+                    .await;
+            }
         }
         Ok(())
     }
@@ -235,6 +240,44 @@ async fn reconcile_once(
     } else {
         Err(anyhow!("no configured NAT backends are available"))
     }
+}
+
+fn release_targets_from_specs(
+    mappings: &[MappingSpec],
+    lease_duration_secs: u32,
+) -> Vec<MappedEndpoint> {
+    mappings
+        .iter()
+        .map(|spec| {
+            let external_port = spec
+                .preferred_external_port
+                .unwrap_or_else(|| spec.local_addr.port());
+            MappedEndpoint {
+                name: spec.name.clone(),
+                protocol: spec.protocol,
+                local_addr: spec.local_addr,
+                external_addr: std::net::SocketAddr::new(spec.local_addr.ip(), external_port),
+                lease_expires_in_secs: lease_duration_secs,
+                backend: String::new(),
+            }
+        })
+        .collect()
+}
+
+fn release_backend_order(
+    selected_backend: &Option<String>,
+    backend_order: &[String],
+) -> Vec<String> {
+    let mut ordered = Vec::new();
+    if let Some(selected_backend) = selected_backend.as_deref() {
+        ordered.push(selected_backend.to_string());
+    }
+    for backend_name in backend_order {
+        if !ordered.contains(backend_name) {
+            ordered.push(backend_name.clone());
+        }
+    }
+    ordered
 }
 
 #[cfg(test)]
@@ -456,5 +499,70 @@ mod tests {
         assert_eq!(status.external_ip_override.as_deref(), Some("203.0.113.10"));
 
         manager.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_releases_configured_ports_when_reconcile_never_populated_status_mappings() {
+        let provider = Arc::new(FakeProvider {
+            name: UPNP_RUPNP_BACKEND,
+            failures_before_success: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+        });
+        let manager = NatManagerBuilder::new(NatConfig {
+            enabled: true,
+            backend_order: vec![UPNP_RUPNP_BACKEND.to_string()],
+            ..NatConfig::default()
+        })
+        .with_mappings(vec![sample_mapping()])
+        .with_provider(provider.clone())
+        .build();
+
+        manager.stop().await.unwrap();
+
+        assert_eq!(provider.release_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_releases_selected_backend_before_fallback_backends() {
+        let selected_provider = Arc::new(FakeProvider {
+            name: UPNP_RUPNP_BACKEND,
+            failures_before_success: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+        });
+        let fallback_provider = Arc::new(FakeProvider {
+            name: UPNP_MINIUPNPC_BACKEND,
+            failures_before_success: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+        });
+        let manager = NatManagerBuilder::new(NatConfig {
+            enabled: true,
+            backend_order: vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string(),
+            ],
+            ..NatConfig::default()
+        })
+        .with_mappings(vec![sample_mapping()])
+        .with_provider(selected_provider.clone())
+        .with_provider(fallback_provider.clone())
+        .build();
+
+        {
+            let mut status = manager.status.write().await;
+            status.backend = Some(UPNP_RUPNP_BACKEND.to_string());
+            status.mappings = vec![MappedEndpoint {
+                name: "kad".to_string(),
+                protocol: TransportProtocol::Udp,
+                local_addr: "0.0.0.0:41000".parse().unwrap(),
+                external_addr: "203.0.113.10:41000".parse().unwrap(),
+                lease_expires_in_secs: 300,
+                backend: UPNP_RUPNP_BACKEND.to_string(),
+            }];
+        }
+
+        manager.stop().await.unwrap();
+
+        assert_eq!(selected_provider.release_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_provider.release_calls.load(Ordering::SeqCst), 1);
     }
 }
