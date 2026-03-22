@@ -277,7 +277,7 @@ impl DhtNode {
                         let _ = rt.add_contact(contact);
                     }
                     info!(
-                        "bootstrap response from {} — routing table now {} contacts",
+                        "bootstrap response from {} - routing table now {} contacts",
                         addr,
                         rt.len()
                     );
@@ -295,7 +295,7 @@ impl DhtNode {
         self.lookup_nodes(&self.inner.own_id).await?;
 
         let size = self.inner.routing_table.lock().await.len();
-        info!("bootstrap complete — routing table has {} contacts", size);
+        info!("bootstrap complete - routing table has {} contacts", size);
 
         if size >= 10 {
             self.inner
@@ -577,4 +577,15 @@ impl DhtNode {
 
 fn addr_from_contact(contact: &Contact) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(contact.ip), contact.udp_port)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bootstrap_log_messages_are_ascii_only() {
+        assert!(
+            "bootstrap response from {addr} - routing table now {contacts} contacts".is_ascii()
+        );
+        assert!("bootstrap complete - routing table has {contacts} contacts".is_ascii());
+    }
 }

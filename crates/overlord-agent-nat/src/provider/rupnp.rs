@@ -16,7 +16,7 @@ use rupnp::{
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{sync::RwLock, task};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::{
     config::NatConfig,
@@ -56,17 +56,32 @@ impl PortMappingProvider for RupnpPortMappingProvider {
             return Ok(());
         }
 
+        info!(
+            "UPnP backend {} starting discovery: bind_ip={} igd_ip={} mappings={}",
+            self.name(),
+            option_display(config.bind_ip.as_deref(), "auto"),
+            option_display(config.igd_ip.as_deref(), "auto"),
+            mapping_specs_display(mappings)
+        );
+
         let gateways = discover_gateways(config).await?;
         let mut last_error = None;
         for gateway in gateways {
+            info!(
+                "UPnP backend {} evaluating gateway {}",
+                self.name(),
+                gateway.device.url()
+            );
             match reconcile_gateway(self.name(), &gateway, config, mappings, Arc::clone(&status))
                 .await
             {
                 Ok(()) => return Ok(()),
                 Err(error) => {
-                    debug!(
-                        "UPnP gateway candidate {} failed to reconcile: {error}",
-                        gateway.device.url()
+                    info!(
+                        "UPnP backend {} gateway {} failed during reconcile: {}",
+                        self.name(),
+                        gateway.device.url(),
+                        error
                     );
                     last_error = Some(error);
                 }
@@ -85,7 +100,17 @@ impl PortMappingProvider for RupnpPortMappingProvider {
         if mappings.is_empty() {
             return Ok(());
         }
+        info!(
+            "UPnP backend {} releasing mappings: {}",
+            self.name(),
+            mapped_endpoints_display(mappings)
+        );
         for gateway in discover_gateways(config).await? {
+            info!(
+                "UPnP backend {} releasing mappings via gateway {}",
+                self.name(),
+                gateway.device.url()
+            );
             for mapping in mappings {
                 let spec = MappingSpec {
                     name: mapping.name.clone(),
@@ -94,11 +119,29 @@ impl PortMappingProvider for RupnpPortMappingProvider {
                     exposure: Default::default(),
                     preferred_external_port: Some(mapping.external_addr.port()),
                 };
-                let _ = gateway
+                info!(
+                    "UPnP backend {} releasing {} mapping {} external_port={}",
+                    self.name(),
+                    mapping.name,
+                    mapping.protocol.as_upnp_token(),
+                    mapping.external_addr.port()
+                );
+                if let Err(error) = gateway
                     .delete_mapping(&spec, mapping.external_addr.port())
-                    .await;
+                    .await
+                {
+                    warn!(
+                        "UPnP backend {} failed to release {} mapping {} external_port={}: {}",
+                        self.name(),
+                        mapping.name,
+                        mapping.protocol.as_upnp_token(),
+                        mapping.external_addr.port(),
+                        error
+                    );
+                }
             }
         }
+        info!("UPnP backend {} release complete", self.name());
         let mut guard = status.write().await;
         guard.mappings.clear();
         Ok(())
@@ -118,6 +161,14 @@ async fn reconcile_gateway(
         gateway.external_ip().await.ok()
     };
 
+    info!(
+        "UPnP backend {} using gateway {} gateway_ip={} external_ip={}",
+        backend_name,
+        gateway.device.url(),
+        gateway.device.url().host().unwrap_or("unknown"),
+        option_display(external_ip_text.as_deref(), "unknown")
+    );
+
     let mut mapped = Vec::with_capacity(mappings.len());
     let mut applied = Vec::with_capacity(mappings.len());
     for spec in mappings {
@@ -127,7 +178,13 @@ async fn reconcile_gateway(
         if let Err(error) = gateway
             .add_mapping(config, config.lease_duration_secs, spec, external_port)
             .await
-            .with_context(|| format!("failed to add {} mapping", spec.name))
+            .with_context(|| {
+                format!(
+                    "gateway {} failed to add {} mapping",
+                    gateway.device.url(),
+                    spec.name
+                )
+            })
         {
             for (applied_spec, applied_port) in applied.into_iter().rev() {
                 let _ = gateway.delete_mapping(applied_spec, applied_port).await;
@@ -135,6 +192,15 @@ async fn reconcile_gateway(
             return Err(error);
         }
         applied.push((spec, external_port));
+        info!(
+            "UPnP backend {} added {} mapping {} external_port={} internal={}:{}",
+            backend_name,
+            spec.name,
+            spec.protocol.as_upnp_token(),
+            external_port,
+            gateway.mapping_internal_ip(config, spec),
+            spec.local_addr.port()
+        );
 
         let external_ip = external_ip_text
             .clone()
@@ -151,6 +217,14 @@ async fn reconcile_gateway(
             backend: backend_name.to_string(),
         });
     }
+
+    info!(
+        "UPnP backend {} reconcile succeeded for gateway {}: external_ip={} mappings={}",
+        backend_name,
+        gateway.device.url(),
+        option_display(external_ip_text.as_deref(), "unknown"),
+        mapped_endpoints_display(&mapped)
+    );
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -267,10 +341,21 @@ async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
         .transpose()?;
     let timeout = Duration::from_secs(config.discovery_timeout_secs.max(1));
 
+    info!(
+        "UPnP backend {} discovery starting: bind_ip={} igd_ip={} timeout_secs={}",
+        UPNP_RUPNP_BACKEND,
+        option_display(config.bind_ip.as_deref(), "auto"),
+        option_display(config.igd_ip.as_deref(), "auto"),
+        timeout.as_secs()
+    );
+
     if let Some(igd_ip) = config.igd_ip.as_deref()
         && let Some(gateway) = discover_gateway_from_configured_ip(igd_ip).await?
     {
-        debug!("UPnP direct IGD probe succeeded for configured gateway {igd_ip}");
+        info!(
+            "UPnP backend {} direct IGD probe succeeded for configured gateway {}",
+            UPNP_RUPNP_BACKEND, igd_ip
+        );
         return Ok(vec![gateway]);
     }
 
@@ -281,8 +366,10 @@ async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
     if let Some(bind_ip) = bind_ip {
         match discover_root_devices_via_bind_ip(bind_ip, timeout).await {
             Ok(devices) => {
-                debug!(
-                    "UPnP bind-ip SSDP discovery on {bind_ip} returned {} root devices",
+                info!(
+                    "UPnP backend {} bind-ip discovery on {} returned {} root devices",
+                    UPNP_RUPNP_BACKEND,
+                    bind_ip,
                     devices.len()
                 );
                 record_devices(
@@ -301,8 +388,9 @@ async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
         if gateways.is_empty() {
             match discover_root_devices(timeout).await {
                 Ok(devices) => {
-                    debug!(
-                        "UPnP generic SSDP discovery returned {} root devices after bind-ip discovery",
+                    info!(
+                        "UPnP backend {} generic discovery returned {} root devices after bind-ip discovery",
+                        UPNP_RUPNP_BACKEND,
                         devices.len()
                     );
                     record_devices(
@@ -334,7 +422,10 @@ async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
     let preferred_gateway_ips = dedupe_ipv4_candidates(fallback_gateway_ips);
     for gateway_ip in &preferred_gateway_ips {
         if let Some(gateway) = discover_gateway_from_configured_ip(&gateway_ip.to_string()).await? {
-            debug!("UPnP direct IGD probe succeeded for fallback gateway {gateway_ip}");
+            info!(
+                "UPnP backend {} direct IGD probe succeeded for fallback gateway {}",
+                UPNP_RUPNP_BACKEND, gateway_ip
+            );
             push_gateway_candidate(&mut gateways, &mut seen_gateways, gateway);
         }
     }
@@ -351,8 +442,9 @@ async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
     }
 
     if !gateways.is_empty() {
-        debug!(
-            "UPnP discovery produced {} gateway candidate(s): {}",
+        info!(
+            "UPnP backend {} discovery produced {} gateway candidate(s): {}",
+            UPNP_RUPNP_BACKEND,
             gateways.len(),
             gateways
                 .iter()
@@ -372,6 +464,53 @@ async fn discover_gateways(config: &NatConfig) -> Result<Vec<GatewayHandle>> {
     } else {
         Err(anyhow!("no UPnP IGD service discovered"))
     }
+}
+
+fn mapping_specs_display(mappings: &[MappingSpec]) -> String {
+    if mappings.is_empty() {
+        return "none".to_string();
+    }
+
+    mappings
+        .iter()
+        .map(|mapping| {
+            let external_port = mapping
+                .preferred_external_port
+                .unwrap_or_else(|| mapping.local_addr.port());
+            format!(
+                "{} {}/{} -> {}",
+                mapping.name,
+                mapping.protocol.as_upnp_token(),
+                external_port,
+                mapping.local_addr
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn mapped_endpoints_display(mappings: &[MappedEndpoint]) -> String {
+    if mappings.is_empty() {
+        return "none".to_string();
+    }
+
+    mappings
+        .iter()
+        .map(|mapping| {
+            format!(
+                "{} {}/{} -> {}",
+                mapping.name,
+                mapping.protocol.as_upnp_token(),
+                mapping.external_addr.port(),
+                mapping.local_addr
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn option_display<'a>(value: Option<&'a str>, fallback: &'a str) -> &'a str {
+    value.unwrap_or(fallback)
 }
 
 fn record_devices(

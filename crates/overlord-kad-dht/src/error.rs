@@ -4,11 +4,11 @@ pub enum DhtError {
     Net(#[from] overlord_kad_net::NetError),
     #[error("no bootstrap nodes available")]
     NoBootstrapNodes,
-    #[error("bootstrap failed — no node responded")]
+    #[error("bootstrap failed - no node responded")]
     BootstrapFailed,
     #[error("search timed out")]
     SearchTimeout,
-    #[error("publish failed — no node accepted")]
+    #[error("publish failed - no node accepted")]
     PublishFailed,
     #[error("routing error: {0}")]
     Routing(#[from] overlord_kad_routing::RoutingError),
@@ -20,4 +20,15 @@ pub enum DhtError {
     SemaphoreClosed,
     #[error("unexpected packet type")]
     UnexpectedPacket,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DhtError;
+
+    #[test]
+    fn runtime_error_messages_are_ascii_only() {
+        assert!(DhtError::BootstrapFailed.to_string().is_ascii());
+        assert!(DhtError::PublishFailed.to_string().is_ascii());
+    }
 }

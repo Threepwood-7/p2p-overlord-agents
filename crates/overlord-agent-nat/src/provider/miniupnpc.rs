@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use miniupnpc::{DiscoveryOptions, Gateway, PortMappingEntry, gateway_from_url};
 use tokio::{sync::RwLock, task};
-use tracing::debug;
+use tracing::{info, warn};
 
 use crate::{
     config::NatConfig,
@@ -44,6 +44,14 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
             return Ok(());
         }
 
+        info!(
+            "UPnP backend {} starting discovery: bind_ip={} igd_ip={} mappings={}",
+            self.name(),
+            option_display(config.bind_ip.as_deref(), "auto"),
+            option_display(config.igd_ip.as_deref(), "auto"),
+            mapping_specs_display(mappings)
+        );
+
         let backend_name = self.name().to_string();
         let config = config.clone();
         let status_config = config.clone();
@@ -52,6 +60,19 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
             task::spawn_blocking(move || reconcile_blocking(&backend_name, &config, &mappings))
                 .await
                 .context("miniupnpc reconcile task failed")??;
+
+        info!(
+            "UPnP backend {} selected gateway {} local_ip={} external_ip={}",
+            self.name(),
+            outcome.gateway.control_url,
+            option_display(outcome.gateway.local_ip.as_deref(), "unknown"),
+            option_display(outcome.gateway.external_ip.as_deref(), "unknown")
+        );
+        info!(
+            "UPnP backend {} reconcile complete: mappings={}",
+            self.name(),
+            mapped_endpoints_display(&outcome.mappings)
+        );
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -84,11 +105,19 @@ impl PortMappingProvider for MiniupnpcPortMappingProvider {
             return Ok(());
         }
 
+        info!(
+            "UPnP backend {} releasing mappings: {}",
+            self.name(),
+            mapped_endpoints_display(mappings)
+        );
+
         let config = config.clone();
         let mappings = mappings.to_vec();
         task::spawn_blocking(move || release_blocking(&config, &mappings))
             .await
             .context("miniupnpc release task failed")??;
+
+        info!("UPnP backend {} release complete", self.name());
 
         let mut guard = status.write().await;
         guard.mappings.clear();
@@ -101,13 +130,26 @@ fn reconcile_blocking(
     config: &NatConfig,
     mappings: &[MappingSpec],
 ) -> Result<ReconcileOutcome> {
-    let gateway = discover_gateway(config)?;
-    let local_ip = gateway_local_ip(config, &gateway)?;
+    let gateway = discover_gateway(config).context("gateway discovery failed")?;
+    let local_ip = gateway_local_ip(config, &gateway).with_context(|| {
+        format!(
+            "gateway {} did not provide a usable LAN IPv4",
+            gateway.control_url()
+        )
+    })?;
     let external_ip_text = config
         .external_ip_override
         .clone()
         .or_else(|| gateway.fetch_external_ip().ok().flatten())
         .or_else(|| gateway.external_ip().map(ToString::to_string));
+
+    info!(
+        "UPnP backend {} using gateway {} gateway_ip={} local_ip={}",
+        backend_name,
+        gateway.control_url(),
+        option_display(gateway.gateway_ip(), "unknown"),
+        local_ip
+    );
 
     let mut applied = Vec::new();
     let mut mapped = Vec::with_capacity(mappings.len());
@@ -125,7 +167,13 @@ fn reconcile_blocking(
                 spec.protocol.as_upnp_token(),
                 config.lease_duration_secs,
             )
-            .with_context(|| format!("failed to add {} mapping", spec.name))
+            .with_context(|| {
+                format!(
+                    "gateway {} failed to add {} mapping",
+                    gateway.control_url(),
+                    spec.name
+                )
+            })
         {
             if !mapping_matches_existing_entry(
                 &gateway,
@@ -133,21 +181,41 @@ fn reconcile_blocking(
                 spec.protocol.as_upnp_token(),
                 &internal_ip,
                 spec.local_addr.port(),
-            )? {
+            )
+            .with_context(|| {
+                format!(
+                    "gateway {} failed to inspect existing {} mapping",
+                    gateway.control_url(),
+                    spec.name
+                )
+            })? {
                 for (protocol, port) in applied.into_iter().rev() {
                     let _ = gateway.delete_port_mapping(port, protocol);
                 }
                 return Err(error);
             }
-            debug!(
-                "miniupnpc reused existing mapping for {} {} -> {}:{}",
+            info!(
+                "UPnP backend {} reused existing {} mapping {} external_port={} internal={}{}{}",
+                backend_name,
+                spec.name,
                 spec.protocol.as_upnp_token(),
                 external_port,
                 internal_ip,
+                ":",
                 spec.local_addr.port()
             );
         } else {
             applied.push((spec.protocol.as_upnp_token(), external_port));
+            info!(
+                "UPnP backend {} added {} mapping {} external_port={} internal={}{}{}",
+                backend_name,
+                spec.name,
+                spec.protocol.as_upnp_token(),
+                external_port,
+                internal_ip,
+                ":",
+                spec.local_addr.port()
+            );
         }
 
         let external_ip = external_ip_text
@@ -165,6 +233,14 @@ fn reconcile_blocking(
         });
     }
 
+    info!(
+        "UPnP backend {} reconcile succeeded for gateway {}: external_ip={} mappings={}",
+        backend_name,
+        gateway.control_url(),
+        option_display(external_ip_text.as_deref(), "unknown"),
+        mapped_endpoints_display(&mapped)
+    );
+
     Ok(ReconcileOutcome {
         gateway: crate::types::SelectedGateway {
             backend: backend_name.to_string(),
@@ -179,23 +255,50 @@ fn reconcile_blocking(
 }
 
 fn release_blocking(config: &NatConfig, mappings: &[MappedEndpoint]) -> Result<()> {
-    let gateway = discover_gateway(config)?;
+    let gateway = discover_gateway(config).context("gateway discovery failed during release")?;
+    info!(
+        "UPnP backend {} releasing mappings via gateway {}",
+        UPNP_MINIUPNPC_BACKEND,
+        gateway.control_url()
+    );
     for mapping in mappings {
-        let _ = gateway.delete_port_mapping(
+        info!(
+            "UPnP backend {} releasing {} mapping {} external_port={}",
+            UPNP_MINIUPNPC_BACKEND,
+            mapping.name,
+            mapping.protocol.as_upnp_token(),
+            mapping.external_addr.port()
+        );
+        if let Err(error) = gateway.delete_port_mapping(
             mapping.external_addr.port(),
             mapping.protocol.as_upnp_token(),
-        );
+        ) {
+            warn!(
+                "UPnP backend {} failed to release {} mapping {} external_port={}: {}",
+                UPNP_MINIUPNPC_BACKEND,
+                mapping.name,
+                mapping.protocol.as_upnp_token(),
+                mapping.external_addr.port(),
+                error
+            );
+        }
     }
     Ok(())
 }
 
 fn discover_gateway(config: &NatConfig) -> Result<Gateway> {
+    info!(
+        "UPnP backend {} discovery starting: bind_ip={} igd_ip={}",
+        UPNP_MINIUPNPC_BACKEND,
+        option_display(config.bind_ip.as_deref(), "auto"),
+        option_display(config.igd_ip.as_deref(), "auto")
+    );
     if let Some(igd_ip) = config.igd_ip.as_deref() {
         for root_description_url in candidate_root_description_urls(igd_ip) {
             if let Some(gateway) = gateway_from_url(&root_description_url)? {
-                debug!(
-                    "miniupnpc direct IGD probe succeeded for configured gateway {} via {}",
-                    igd_ip, root_description_url
+                info!(
+                    "UPnP backend {} direct IGD probe succeeded for configured gateway {} via {}",
+                    UPNP_MINIUPNPC_BACKEND, igd_ip, root_description_url
                 );
                 return Ok(gateway);
             }
@@ -211,8 +314,9 @@ fn discover_gateway(config: &NatConfig) -> Result<Gateway> {
         ..DiscoveryOptions::default()
     })?;
 
-    debug!(
-        "miniupnpc discovery found {} device(s); gateway discovered={}",
+    info!(
+        "UPnP backend {} discovery found {} device(s); gateway discovered={}",
+        UPNP_MINIUPNPC_BACKEND,
         discovery.devices.len(),
         discovery.gateway.is_some()
     );
@@ -297,6 +401,53 @@ fn existing_mapping_matches(
     expected_internal_port: u16,
 ) -> bool {
     entry.internal_client == expected_internal_ip && entry.internal_port == expected_internal_port
+}
+
+fn mapping_specs_display(mappings: &[MappingSpec]) -> String {
+    if mappings.is_empty() {
+        return "none".to_string();
+    }
+
+    mappings
+        .iter()
+        .map(|mapping| {
+            let external_port = mapping
+                .preferred_external_port
+                .unwrap_or_else(|| mapping.local_addr.port());
+            format!(
+                "{} {}/{} -> {}",
+                mapping.name,
+                mapping.protocol.as_upnp_token(),
+                external_port,
+                mapping.local_addr
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn mapped_endpoints_display(mappings: &[MappedEndpoint]) -> String {
+    if mappings.is_empty() {
+        return "none".to_string();
+    }
+
+    mappings
+        .iter()
+        .map(|mapping| {
+            format!(
+                "{} {}/{} -> {}",
+                mapping.name,
+                mapping.protocol.as_upnp_token(),
+                mapping.external_addr.port(),
+                mapping.local_addr
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn option_display<'a>(value: Option<&'a str>, fallback: &'a str) -> &'a str {
+    value.unwrap_or(fallback)
 }
 
 #[cfg(test)]

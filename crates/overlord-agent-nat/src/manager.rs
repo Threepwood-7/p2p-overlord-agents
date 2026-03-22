@@ -11,7 +11,7 @@ use tokio::{
     sync::{Mutex, RwLock},
     task::JoinHandle,
 };
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 use crate::{
     config::NatConfig,
@@ -175,11 +175,25 @@ async fn run_manager_loop(
     );
 
     while !shutdown.load(Ordering::Relaxed) {
+        info!(
+            "UPnP reconcile starting: bind_ip={} igd_ip={} backends={} mappings={}",
+            option_display(config.bind_ip.as_deref(), "auto"),
+            option_display(config.igd_ip.as_deref(), "auto"),
+            backend_order_display(&config.backend_order),
+            requested_mappings_display(&mappings)
+        );
         let reconcile_result =
             reconcile_once(&config, &mappings, &providers, Arc::clone(&status)).await;
         match reconcile_result {
             Ok(()) => {
                 let snapshot = status.read().await.clone();
+                info!(
+                    "UPnP reconcile succeeded via backend {}: gateway={} external_ip={} mappings={}",
+                    option_display(snapshot.backend.as_deref(), "unknown"),
+                    selected_gateway_display(snapshot.gateway.as_ref()),
+                    observed_external_ip_display(&snapshot.observed_external_addresses),
+                    mapped_endpoints_display(&snapshot.mappings)
+                );
                 reachability.on_nat_status_changed(snapshot).await;
                 tokio::time::sleep(refresh_period).await;
             }
@@ -211,35 +225,127 @@ async fn reconcile_once(
     providers: &[Arc<dyn PortMappingProvider>],
     status: Arc<RwLock<NatStatus>>,
 ) -> Result<()> {
-    let mut attempted = false;
-    let mut last_error = None;
+    let mut backend_errors = Vec::new();
     for backend_name in &config.backend_order {
         let Some(provider) = providers
             .iter()
             .find(|provider| provider.name() == backend_name.as_str())
         else {
+            let backend_error = format!("{backend_name}: backend not available in this build");
+            warn!(
+                "UPnP backend {} is configured but not available",
+                backend_name
+            );
+            backend_errors.push(backend_error);
             continue;
         };
-        attempted = true;
+
+        info!("UPnP reconcile trying backend {}", provider.name());
         match provider
             .reconcile(config, mappings, Arc::clone(&status))
             .await
         {
             Ok(()) => return Ok(()),
             Err(error) => {
-                debug!("nat backend {} failed: {error}", provider.name());
-                last_error = Some(format!("{}: {error}", provider.name()));
+                let backend_error = format!("{}: {error}", provider.name());
+                warn!(
+                    "UPnP backend {} failed during reconcile: {}",
+                    provider.name(),
+                    error
+                );
+                backend_errors.push(backend_error);
             }
         }
     }
 
-    if attempted {
-        Err(anyhow!(last_error.unwrap_or_else(|| {
-            "all configured NAT backends failed".to_string()
-        })))
-    } else {
+    if backend_errors.is_empty() {
         Err(anyhow!("no configured NAT backends are available"))
+    } else {
+        Err(anyhow!(aggregated_backend_error(&backend_errors)))
     }
+}
+
+fn aggregated_backend_error(backend_errors: &[String]) -> String {
+    let backend_label = if backend_errors.len() == 1 {
+        "backend"
+    } else {
+        "backends"
+    };
+    format!(
+        "UPnP reconcile failed after {} {}: {}",
+        backend_errors.len(),
+        backend_label,
+        backend_errors.join("; ")
+    )
+}
+
+fn backend_order_display(backend_order: &[String]) -> String {
+    if backend_order.is_empty() {
+        "none".to_string()
+    } else {
+        backend_order.join(", ")
+    }
+}
+
+fn requested_mappings_display(mappings: &[MappingSpec]) -> String {
+    if mappings.is_empty() {
+        return "none".to_string();
+    }
+
+    mappings
+        .iter()
+        .map(|mapping| {
+            let external_port = mapping
+                .preferred_external_port
+                .unwrap_or_else(|| mapping.local_addr.port());
+            format!(
+                "{} {}/{} -> {}",
+                mapping.name,
+                mapping.protocol.as_upnp_token(),
+                external_port,
+                mapping.local_addr
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn mapped_endpoints_display(mappings: &[MappedEndpoint]) -> String {
+    if mappings.is_empty() {
+        return "none".to_string();
+    }
+
+    mappings
+        .iter()
+        .map(|mapping| {
+            format!(
+                "{} {}/{} -> {}",
+                mapping.name,
+                mapping.protocol.as_upnp_token(),
+                mapping.external_addr.port(),
+                mapping.local_addr
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn selected_gateway_display(gateway: Option<&crate::types::SelectedGateway>) -> &str {
+    gateway
+        .map(|selected| selected.control_url.as_str())
+        .unwrap_or("unknown")
+}
+
+fn observed_external_ip_display(observed_external_addresses: &[String]) -> String {
+    if observed_external_addresses.is_empty() {
+        "unknown".to_string()
+    } else {
+        observed_external_addresses.join(", ")
+    }
+}
+
+fn option_display<'a>(value: Option<&'a str>, fallback: &'a str) -> &'a str {
+    value.unwrap_or(fallback)
 }
 
 fn release_targets_from_specs(
@@ -297,6 +403,7 @@ mod tests {
     struct FakeProvider {
         name: &'static str,
         failures_before_success: AtomicUsize,
+        reconcile_calls: AtomicUsize,
         release_calls: AtomicUsize,
     }
 
@@ -312,7 +419,9 @@ mod tests {
             mappings: &[MappingSpec],
             status: Arc<RwLock<NatStatus>>,
         ) -> Result<()> {
-            if self.failures_before_success.fetch_sub(1, Ordering::SeqCst) > 0 {
+            self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
+            if self.failures_before_success.load(Ordering::SeqCst) > 0 {
+                self.failures_before_success.fetch_sub(1, Ordering::SeqCst);
                 return Err(anyhow!("boom"));
             }
             let mut guard = status.write().await;
@@ -364,6 +473,7 @@ mod tests {
         let provider = Arc::new(FakeProvider {
             name: UPNP_RUPNP_BACKEND,
             failures_before_success: AtomicUsize::new(0),
+            reconcile_calls: AtomicUsize::new(0),
             release_calls: AtomicUsize::new(0),
         });
         let status = Arc::new(RwLock::new(NatStatus::default()));
@@ -405,6 +515,7 @@ mod tests {
             &[Arc::new(FakeProvider {
                 name: UPNP_RUPNP_BACKEND,
                 failures_before_success: AtomicUsize::new(0),
+                reconcile_calls: AtomicUsize::new(0),
                 release_calls: AtomicUsize::new(0),
             })],
             Arc::clone(&status),
@@ -414,7 +525,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "no configured NAT backends are available"
+            "UPnP reconcile failed after 1 backend: unknown_backend: backend not available in this build"
         );
     }
 
@@ -438,7 +549,9 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            format!("{UPNP_IGD_BACKEND}: {UPNP_IGD_BACKEND} backend not implemented yet")
+            format!(
+                "UPnP reconcile failed after 1 backend: {UPNP_IGD_BACKEND}: {UPNP_IGD_BACKEND} backend not implemented yet"
+            )
         );
     }
 
@@ -447,6 +560,7 @@ mod tests {
         let provider = Arc::new(FakeProvider {
             name: UPNP_MINIUPNPC_BACKEND,
             failures_before_success: AtomicUsize::new(0),
+            reconcile_calls: AtomicUsize::new(0),
             release_calls: AtomicUsize::new(0),
         });
         let status = Arc::new(RwLock::new(NatStatus::default()));
@@ -506,6 +620,7 @@ mod tests {
         let provider = Arc::new(FakeProvider {
             name: UPNP_RUPNP_BACKEND,
             failures_before_success: AtomicUsize::new(0),
+            reconcile_calls: AtomicUsize::new(0),
             release_calls: AtomicUsize::new(0),
         });
         let manager = NatManagerBuilder::new(NatConfig {
@@ -527,11 +642,13 @@ mod tests {
         let selected_provider = Arc::new(FakeProvider {
             name: UPNP_RUPNP_BACKEND,
             failures_before_success: AtomicUsize::new(0),
+            reconcile_calls: AtomicUsize::new(0),
             release_calls: AtomicUsize::new(0),
         });
         let fallback_provider = Arc::new(FakeProvider {
             name: UPNP_MINIUPNPC_BACKEND,
             failures_before_success: AtomicUsize::new(0),
+            reconcile_calls: AtomicUsize::new(0),
             release_calls: AtomicUsize::new(0),
         });
         let manager = NatManagerBuilder::new(NatConfig {
@@ -564,5 +681,127 @@ mod tests {
 
         assert_eq!(selected_provider.release_calls.load(Ordering::SeqCst), 1);
         assert_eq!(fallback_provider.release_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_aggregates_backend_errors_in_order() {
+        let miniupnpc = Arc::new(FakeProvider {
+            name: UPNP_MINIUPNPC_BACKEND,
+            failures_before_success: AtomicUsize::new(1),
+            reconcile_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+        });
+        let rupnp = Arc::new(FakeProvider {
+            name: UPNP_RUPNP_BACKEND,
+            failures_before_success: AtomicUsize::new(1),
+            reconcile_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+        });
+        let status = Arc::new(RwLock::new(NatStatus::default()));
+        let config = NatConfig {
+            enabled: true,
+            backend_order: vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string(),
+            ],
+            ..NatConfig::default()
+        };
+
+        let error = reconcile_once(
+            &config,
+            &[sample_mapping()],
+            &[miniupnpc, rupnp],
+            Arc::clone(&status),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "UPnP reconcile failed after 2 backends: upnp_miniupnpc: boom; upnp_rupnp: boom"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_stops_after_first_successful_backend() {
+        let preferred_provider = Arc::new(FakeProvider {
+            name: UPNP_MINIUPNPC_BACKEND,
+            failures_before_success: AtomicUsize::new(0),
+            reconcile_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+        });
+        let fallback_provider = Arc::new(FakeProvider {
+            name: UPNP_RUPNP_BACKEND,
+            failures_before_success: AtomicUsize::new(0),
+            reconcile_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+        });
+        let status = Arc::new(RwLock::new(NatStatus::default()));
+        let config = NatConfig {
+            enabled: true,
+            backend_order: vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string(),
+            ],
+            ..NatConfig::default()
+        };
+
+        reconcile_once(
+            &config,
+            &[sample_mapping()],
+            &[preferred_provider.clone(), fallback_provider.clone()],
+            Arc::clone(&status),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(preferred_provider.reconcile_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_provider.reconcile_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn start_records_aggregated_backend_error_in_status() {
+        let miniupnpc = Arc::new(FakeProvider {
+            name: UPNP_MINIUPNPC_BACKEND,
+            failures_before_success: AtomicUsize::new(1),
+            reconcile_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+        });
+        let rupnp = Arc::new(FakeProvider {
+            name: UPNP_RUPNP_BACKEND,
+            failures_before_success: AtomicUsize::new(1),
+            reconcile_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+        });
+        let manager = NatManagerBuilder::new(NatConfig {
+            enabled: true,
+            backend_order: vec![
+                UPNP_MINIUPNPC_BACKEND.to_string(),
+                UPNP_RUPNP_BACKEND.to_string(),
+            ],
+            ..NatConfig::default()
+        })
+        .with_mappings(vec![sample_mapping()])
+        .with_provider(miniupnpc)
+        .with_provider(rupnp)
+        .build();
+
+        manager.start().await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let status = manager.status().await;
+            if let Some(last_error) = status.last_error {
+                assert_eq!(
+                    last_error,
+                    "UPnP reconcile failed after 2 backends: upnp_miniupnpc: boom; upnp_rupnp: boom"
+                );
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        manager.stop().await.unwrap();
     }
 }
