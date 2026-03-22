@@ -1,6 +1,6 @@
 use md5::compute as md5_compute;
-use overlord_kad_proto::constants::{OP_KADEMLIAHEADER, OP_KADEMLIAPACKEDPROT};
 use overlord_kad_proto::NodeId;
+use overlord_kad_proto::constants::{OP_KADEMLIAHEADER, OP_KADEMLIAPACKEDPROT};
 use rand::Rng;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -184,7 +184,13 @@ impl ObfuscationLayer {
             return plaintext.to_vec();
         }
 
-        let peer = self.peers.lock().unwrap().get(&addr).cloned().unwrap_or_default();
+        let peer = self
+            .peers
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .cloned()
+            .unwrap_or_default();
         let preferred_mode = if peer.node_id.is_some() {
             Some(KadKeyMode::NodeId)
         } else if peer.receiver_verify_key.is_some() {
@@ -213,9 +219,8 @@ impl ObfuscationLayer {
         let mut encrypted_tail = Vec::with_capacity(13 + plaintext.len());
         encrypted_tail.extend_from_slice(&MAGICVALUE_UDP_SYNC_CLIENT.to_le_bytes());
         encrypted_tail.push(UDP_PADDING_LEN);
-        encrypted_tail.extend_from_slice(
-            &peer.receiver_verify_key.unwrap_or_default().to_le_bytes(),
-        );
+        encrypted_tail
+            .extend_from_slice(&peer.receiver_verify_key.unwrap_or_default().to_le_bytes());
         encrypted_tail.extend_from_slice(&sender_verify_key.to_le_bytes());
         encrypted_tail.extend_from_slice(plaintext);
         rc4(&rc4_key, &mut encrypted_tail);

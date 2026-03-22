@@ -29,6 +29,8 @@ async fn main() -> Result<()> {
     match agent.serve().await? {
         AgentExit::Stopped => {}
         AgentExit::RestartRequested => {
+            // A restart request means the control endpoint must be rebound.
+            // Relaunch the same executable with the same `--config` path.
             info!("restarting overlord-agent-emule process");
             restart_self(&config_path)?;
         }
@@ -36,6 +38,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Spawns a replacement agent process that reuses the current executable and
+/// the same config path originally supplied to this process.
 fn restart_self(config_path: &PathBuf) -> Result<()> {
     let current_exe = std::env::current_exe()?;
     Command::new(current_exe)

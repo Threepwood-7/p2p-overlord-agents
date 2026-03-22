@@ -117,11 +117,8 @@ impl DhtNode {
         }
 
         let transport = UdpTransport::bind(config.bind_addr).await?;
-        let obfuscation = ObfuscationLayer::new(
-            config.node_id,
-            config.udp_key,
-            config.obfuscation_enabled,
-        );
+        let obfuscation =
+            ObfuscationLayer::new(config.node_id, config.udp_key, config.obfuscation_enabled);
         let rpc = RpcManager::new(
             transport,
             obfuscation,
@@ -198,7 +195,9 @@ impl DhtNode {
         let addr = addr_from_contact(&contact);
         self.inner.rpc.register_peer_identity(addr, contact.id);
         if contact.udp_key != KadUdpKey::ZERO {
-            self.inner.rpc.register_peer_key(addr, contact.udp_key.value());
+            self.inner
+                .rpc
+                .register_peer_key(addr, contact.udp_key.value());
         }
         self.inner.routing_table.lock().await.add_contact(contact)?;
         Ok(())

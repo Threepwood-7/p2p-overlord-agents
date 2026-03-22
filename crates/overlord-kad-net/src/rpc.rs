@@ -240,7 +240,10 @@ impl RpcManager {
     pub async fn send(&self, addr: SocketAddr, packet: &KadPacket) -> Result<(), NetError> {
         self.inner.rate_limiter.acquire().await;
         let encoded = packet.encode()?;
-        let wire = self.inner.obfuscation.encrypt(addr, packet.opcode(), &encoded);
+        let wire = self
+            .inner
+            .obfuscation
+            .encrypt(addr, packet.opcode(), &encoded);
         self.inner.transport.send_raw(addr, &wire).await
     }
 

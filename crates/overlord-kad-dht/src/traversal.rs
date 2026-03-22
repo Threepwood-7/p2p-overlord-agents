@@ -898,7 +898,10 @@ mod tests {
                 target,
                 contacts: Vec::new(),
             });
-            injector.send((packet.encode().unwrap(), reply_addr)).await.unwrap();
+            injector
+                .send((packet.encode().unwrap(), reply_addr))
+                .await
+                .unwrap();
         });
 
         let result = run_traversal(

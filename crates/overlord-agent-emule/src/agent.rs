@@ -64,6 +64,50 @@ const SNOOP_FLUSH_SECS: u64 = 30;
 const PASSIVE_CRAWL_SECS: u64 = 45;
 const EMULE_LARGE_FILE_SIZE_THRESHOLD: u64 = u32::MAX as u64;
 
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+
+        let mut ctrl_c_stream = ctrl_c().context("failed to install Ctrl+C handler")?;
+        let mut ctrl_break_stream = ctrl_break().context("failed to install Ctrl+Break handler")?;
+        let mut ctrl_close_stream =
+            ctrl_close().context("failed to install console-close handler")?;
+        let mut ctrl_shutdown_stream =
+            ctrl_shutdown().context("failed to install console-shutdown handler")?;
+
+        tokio::select! {
+            _ = ctrl_c_stream.recv() => Ok("Ctrl+C"),
+            _ = ctrl_break_stream.recv() => Ok("Ctrl+Break"),
+            _ = ctrl_close_stream.recv() => Ok("ConsoleClose"),
+            _ = ctrl_shutdown_stream.recv() => Ok("ConsoleShutdown"),
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut sigint =
+            signal(SignalKind::interrupt()).context("failed to install SIGINT handler")?;
+        let mut sigterm =
+            signal(SignalKind::terminate()).context("failed to install SIGTERM handler")?;
+
+        tokio::select! {
+            _ = sigint.recv() => Ok("SIGINT"),
+            _ = sigterm.recv() => Ok("SIGTERM"),
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("failed while waiting for Ctrl+C")?;
+        Ok("Ctrl+C")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SyntheticPopularSeed {
     title: &'static str,
@@ -466,6 +510,10 @@ impl OverlordAgentEmule {
         let config = self.config.read().await.clone();
         let bind_addr = Self::startup_control_bind_addr(&config)?;
         self.start_control_server_with_retry(bind_addr).await?;
+        // Startup sync can immediately request a process restart when the
+        // coordinator-sourced networking config changes the control endpoint.
+        // Later restart requests are deferred through `restart_notify` (for
+        // reconnect/config-update flows) so serve() can stop cleanly first.
         let reconnect_task = match self.connect_to_coordinator().await {
             Ok(NetworkingConfigApplyOutcome::RestartRequired) => {
                 self.stop().await?;
@@ -483,8 +531,8 @@ impl OverlordAgentEmule {
         };
 
         tokio::select! {
-            ctrl_c = tokio::signal::ctrl_c() => {
-                ctrl_c.context("failed while waiting for ctrl-c")?;
+            shutdown_signal = wait_for_shutdown_signal() => {
+                info!("shutdown signal received: {}", shutdown_signal?);
             }
             _ = self.restart_notify.notified() => {}
         }
@@ -772,9 +820,11 @@ impl OverlordAgentEmule {
         self.restart_notify.notify_waiters();
     }
 
-    /// Returns `true` only when the control server listener endpoint changes and
-    /// the process must restart to rebind it cleanly. P2P endpoint changes are
-    /// reconciled in-process by rebuilding the runtime.
+    /// Returns `true` only when the startup control listener endpoint changes.
+    ///
+    /// That endpoint cannot be safely rebound in-process, so the agent exits
+    /// with `RestartRequested` and the binary relaunches it. NAT-only and P2P
+    /// endpoint changes are applied in-process via runtime reconciliation.
     fn restart_required_for_networking_change(
         old: &AgentNetworkingConfig,
         new: &AgentNetworkingConfig,
@@ -2155,6 +2205,9 @@ impl IndexerService for OverlordAgentEmule {
     async fn apply_config(&self, config: ConfigUpdate) -> Result<()> {
         let next: AgentNetworkingConfig = serde_json::from_value(config.config)
             .context("invalid config payload for overlord-agent-emule")?;
+        // `/api/internal/config-update` requests restart only when the updated
+        // networking shape changes the control endpoint; otherwise we reconcile
+        // NAT/P2P runtime state in-process.
         if let NetworkingConfigApplyOutcome::RestartRequired =
             self.apply_networking_config_update(&next).await?
         {
