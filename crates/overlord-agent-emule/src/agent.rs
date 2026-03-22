@@ -400,6 +400,13 @@ pub enum AgentExit {
     RestartRequested,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkingConfigApplyOutcome {
+    Unchanged,
+    ReconciledInPlace,
+    RestartRequired,
+}
+
 impl OverlordAgentEmule {
     pub async fn new(config: EmuleAgentConfig) -> Result<Self> {
         let indexer_id = load_or_create_indexer_id(&config.agent.indexer_id_path)?;
@@ -460,12 +467,13 @@ impl OverlordAgentEmule {
         let bind_addr = Self::startup_control_bind_addr(&config)?;
         self.start_control_server_with_retry(bind_addr).await?;
         let reconnect_task = match self.connect_to_coordinator().await {
-            Ok(true) => {
+            Ok(NetworkingConfigApplyOutcome::RestartRequired) => {
                 self.stop().await?;
                 self.stop_control_server().await?;
                 return Ok(AgentExit::RestartRequested);
             }
-            Ok(false) => None,
+            Ok(NetworkingConfigApplyOutcome::Unchanged)
+            | Ok(NetworkingConfigApplyOutcome::ReconciledInPlace) => None,
             Err(error) => {
                 warn!(
                     "coordinator unavailable during startup; continuing with local config: {error}"
@@ -713,7 +721,7 @@ impl OverlordAgentEmule {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("control server failed to start")))
     }
 
-    async fn connect_to_coordinator(&self) -> Result<bool> {
+    async fn connect_to_coordinator(&self) -> Result<NetworkingConfigApplyOutcome> {
         self.register_with_coordinator().await?;
         self.sync_networking_config_from_coordinator().await
     }
@@ -727,14 +735,20 @@ impl OverlordAgentEmule {
                 }
 
                 match self.connect_to_coordinator().await {
-                    Ok(true) => {
+                    Ok(NetworkingConfigApplyOutcome::RestartRequired) => {
                         info!(
                             "reconnected to coordinator and received updated networking config; restarting agent"
                         );
                         self.request_restart();
                         break;
                     }
-                    Ok(false) => {
+                    Ok(NetworkingConfigApplyOutcome::ReconciledInPlace) => {
+                        info!(
+                            "reconnected to coordinator and applied networking config without restarting agent"
+                        );
+                        break;
+                    }
+                    Ok(NetworkingConfigApplyOutcome::Unchanged) => {
                         info!("reconnected to coordinator; coordinator integration resumed");
                         break;
                     }
@@ -756,6 +770,67 @@ impl OverlordAgentEmule {
     fn request_restart(&self) {
         self.restart_requested.store(true, Ordering::SeqCst);
         self.restart_notify.notify_waiters();
+    }
+
+    /// Returns `true` only when the control server listener endpoint changes and
+    /// the process must restart to rebind it cleanly. P2P endpoint changes are
+    /// reconciled in-process by rebuilding the runtime.
+    fn restart_required_for_networking_change(
+        old: &AgentNetworkingConfig,
+        new: &AgentNetworkingConfig,
+    ) -> bool {
+        let old_config = Self::config_for_restart_decision(old);
+        let new_config = Self::config_for_restart_decision(new);
+        Self::startup_control_bind_addr(&old_config).ok()
+            != Self::startup_control_bind_addr(&new_config).ok()
+    }
+
+    fn config_for_restart_decision(networking: &AgentNetworkingConfig) -> EmuleAgentConfig {
+        let mut config = EmuleAgentConfig::default();
+        apply_networking_config(&mut config, networking);
+        config
+    }
+
+    async fn apply_networking_config_update(
+        &self,
+        desired: &AgentNetworkingConfig,
+    ) -> Result<NetworkingConfigApplyOutcome> {
+        let (old_networking, new_networking, restart_required) = {
+            let mut guard = self.config.write().await;
+            let old_networking = Self::networking_config(&guard);
+            if old_networking == *desired {
+                return Ok(NetworkingConfigApplyOutcome::Unchanged);
+            }
+
+            apply_networking_config(&mut guard, desired);
+            let new_networking = Self::networking_config(&guard);
+            let restart_required =
+                Self::restart_required_for_networking_change(&old_networking, &new_networking);
+            (old_networking, new_networking, restart_required)
+        };
+
+        debug!(
+            restart_required,
+            old_control_bind_ip = ?old_networking.control.bind_ip,
+            new_control_bind_ip = ?new_networking.control.bind_ip,
+            old_control_port = old_networking.control.listen_port,
+            new_control_port = new_networking.control.listen_port,
+            old_p2p_bind_ip = ?old_networking.p2p.bind_ip,
+            new_p2p_bind_ip = ?new_networking.p2p.bind_ip,
+            old_kad_port = old_networking.p2p.kad.listen_port,
+            new_kad_port = new_networking.p2p.kad.listen_port,
+            old_ed2k_port = old_networking.p2p.ed2k.listen_port,
+            new_ed2k_port = new_networking.p2p.ed2k.listen_port,
+            "applied networking config update"
+        );
+
+        persist_networking_config(&self.state_paths, &new_networking)?;
+        if restart_required {
+            return Ok(NetworkingConfigApplyOutcome::RestartRequired);
+        }
+
+        self.reconcile_runtime().await?;
+        Ok(NetworkingConfigApplyOutcome::ReconciledInPlace)
     }
 
     fn nat_mappings_from_config(
@@ -785,7 +860,9 @@ impl OverlordAgentEmule {
         ])
     }
 
-    async fn sync_networking_config_from_coordinator(&self) -> Result<bool> {
+    async fn sync_networking_config_from_coordinator(
+        &self,
+    ) -> Result<NetworkingConfigApplyOutcome> {
         let view = self
             .coordinator
             .agent_interfaces_view(self.indexer_id)
@@ -793,24 +870,11 @@ impl OverlordAgentEmule {
         self.sync_networking_config_from_view(&view).await
     }
 
-    async fn sync_networking_config_from_view(&self, view: &AgentInterfacesView) -> Result<bool> {
-        let current = self
-            .config
-            .try_read()
-            .map(|config| Self::networking_config(&config))
-            .unwrap_or_else(|_| empty_networking_config());
-
-        if current == view.config {
-            return Ok(false);
-        }
-
-        {
-            let mut guard = self.config.write().await;
-            apply_networking_config(&mut guard, &view.config);
-            persist_networking_config(&self.state_paths, &view.config)?;
-        }
-
-        Ok(true)
+    async fn sync_networking_config_from_view(
+        &self,
+        view: &AgentInterfacesView,
+    ) -> Result<NetworkingConfigApplyOutcome> {
+        self.apply_networking_config_update(&view.config).await
     }
 
     async fn interface_report(&self) -> AgentNetworkReport {
@@ -1815,6 +1879,7 @@ impl AgentStatePaths {
     }
 }
 
+#[cfg(test)]
 fn empty_networking_config() -> AgentNetworkingConfig {
     AgentNetworkingConfig {
         control: AgentControlConfig {
@@ -2090,13 +2155,9 @@ impl IndexerService for OverlordAgentEmule {
     async fn apply_config(&self, config: ConfigUpdate) -> Result<()> {
         let next: AgentNetworkingConfig = serde_json::from_value(config.config)
             .context("invalid config payload for overlord-agent-emule")?;
-        let mut guard = self.config.write().await;
-        let old_networking = Self::networking_config(&guard);
-        apply_networking_config(&mut guard, &next);
-        let new_networking = Self::networking_config(&guard);
-        drop(guard);
-        if old_networking != new_networking {
-            persist_networking_config(&self.state_paths, &new_networking)?;
+        if let NetworkingConfigApplyOutcome::RestartRequired =
+            self.apply_networking_config_update(&next).await?
+        {
             self.request_restart();
         }
         Ok(())
@@ -2290,8 +2351,8 @@ mod tests {
     };
     use chrono::{TimeZone, Utc};
     use overlord_agent_common::{
-        AgentInterfacesView, CoordinatorClient, HashType, IndexerRegistration, IndexerService,
-        PopularHash, Protocol, PublishCounters, PublishSeedSource, RegisterRequest,
+        AgentInterfacesView, ConfigUpdate, CoordinatorClient, HashType, IndexerRegistration,
+        IndexerService, PopularHash, Protocol, PublishCounters, PublishSeedSource, RegisterRequest,
         RegistrationResponse, SnoopEntry,
     };
     use overlord_agent_nat::{UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND};
@@ -2303,7 +2364,7 @@ mod tests {
         path::Path,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+            atomic::{AtomicUsize, Ordering, Ordering as AtomicOrdering},
         },
         time::Duration,
     };
@@ -2491,6 +2552,39 @@ mod tests {
             config.nat.p2p.backend_order,
             vec![UPNP_RUPNP_BACKEND.to_string()]
         );
+    }
+
+    #[test]
+    fn restart_required_only_for_control_endpoint_changes() {
+        let old = empty_networking_config();
+
+        let mut nat_only = old.clone();
+        nat_only.nat.p2p.enabled = true;
+        nat_only.nat.p2p.backend_order = vec![UPNP_RUPNP_BACKEND.to_string()];
+        assert!(!OverlordAgentEmule::restart_required_for_networking_change(
+            &old, &nat_only
+        ));
+
+        let mut control_bind_ip = old.clone();
+        control_bind_ip.control.bind_ip = Some("127.0.0.1".to_string());
+        control_bind_ip.control.selection_confirmed = true;
+        assert!(OverlordAgentEmule::restart_required_for_networking_change(
+            &old,
+            &control_bind_ip
+        ));
+
+        let mut control_port = old.clone();
+        control_port.control.listen_port = 14_001;
+        assert!(OverlordAgentEmule::restart_required_for_networking_change(
+            &old,
+            &control_port
+        ));
+
+        let mut p2p_port = old.clone();
+        p2p_port.p2p.kad.listen_port = 41_999;
+        assert!(!OverlordAgentEmule::restart_required_for_networking_change(
+            &old, &p2p_port
+        ));
     }
 
     #[test]
@@ -2715,6 +2809,93 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        fs::remove_dir_all(&temp_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_config_without_endpoint_change_reconciles_in_place() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "overlord-agent-emule-config-update-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
+        let agent = OverlordAgentEmule::new(config).await.unwrap();
+        agent.start().await.unwrap();
+
+        let current = agent.config.read().await.clone();
+        let mut desired = OverlordAgentEmule::networking_config(&current);
+        desired.nat.p2p.enabled = true;
+        desired.nat.p2p.backend_order = vec![UPNP_RUPNP_BACKEND.to_string()];
+
+        agent
+            .apply_config(ConfigUpdate {
+                protocol: Protocol::Kad2,
+                config: serde_json::to_value(desired).unwrap(),
+            })
+            .await
+            .unwrap();
+
+        assert!(!agent.restart_requested.load(Ordering::SeqCst));
+        assert!(agent.runtime.lock().await.is_some());
+
+        agent.stop().await.unwrap();
+        fs::remove_dir_all(&temp_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_config_with_control_endpoint_change_requests_restart() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "overlord-agent-emule-control-endpoint-update-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
+        let agent = OverlordAgentEmule::new(config).await.unwrap();
+        agent.start().await.unwrap();
+
+        let current = agent.config.read().await.clone();
+        let mut desired = OverlordAgentEmule::networking_config(&current);
+        desired.control.listen_port = 13_302;
+
+        agent
+            .apply_config(ConfigUpdate {
+                protocol: Protocol::Kad2,
+                config: serde_json::to_value(desired).unwrap(),
+            })
+            .await
+            .unwrap();
+
+        assert!(agent.restart_requested.load(Ordering::SeqCst));
+
+        agent.stop().await.unwrap();
+        fs::remove_dir_all(&temp_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_config_with_p2p_endpoint_change_reconciles_in_place() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "overlord-agent-emule-p2p-endpoint-update-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
+        let agent = OverlordAgentEmule::new(config).await.unwrap();
+        agent.start().await.unwrap();
+
+        let current = agent.config.read().await.clone();
+        let mut desired = OverlordAgentEmule::networking_config(&current);
+        desired.p2p.kad.listen_port = 42_000;
+
+        agent
+            .apply_config(ConfigUpdate {
+                protocol: Protocol::Kad2,
+                config: serde_json::to_value(desired).unwrap(),
+            })
+            .await
+            .unwrap();
+
+        assert!(!agent.restart_requested.load(Ordering::SeqCst));
+        assert!(agent.runtime.lock().await.is_some());
+
+        agent.stop().await.unwrap();
         fs::remove_dir_all(&temp_root).unwrap();
     }
 
