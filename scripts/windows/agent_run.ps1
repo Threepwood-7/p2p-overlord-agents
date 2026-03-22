@@ -11,7 +11,7 @@ either standard or attach-friendly debug mode.
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'debug')]
+    [ValidateSet('start', 'debug', 'stop')]
     [string]$Command = 'start',
 
     [string]$ConfigPath,
@@ -103,6 +103,26 @@ function Stop-DanglingAgentProcesses {
     $danglingProcesses |
         Select-Object -ExpandProperty Id |
         ForEach-Object { Wait-Process -Id $_ -Timeout 5 -ErrorAction SilentlyContinue }
+}
+
+function Stop-Agent {
+    $runningProcesses = @(Get-DanglingAgentProcesses)
+    if ($runningProcesses.Count -eq 0) {
+        Write-Log 'No overlord-agent-emule process is currently running.'
+        return 0
+    }
+
+    Write-Log "Stopping overlord-agent-emule instance(s): $($runningProcesses.Id -join ', ')"
+    foreach ($process in $runningProcesses) {
+        Stop-Process -Id $process.Id -Force
+    }
+
+    $runningProcesses |
+        Select-Object -ExpandProperty Id |
+        ForEach-Object { Wait-Process -Id $_ -Timeout 5 -ErrorAction SilentlyContinue }
+
+    Write-Log 'overlord-agent-emule stopped.'
+    return 0
 }
 
 function Invoke-CargoBuild {
@@ -206,6 +226,10 @@ function Start-Agent {
 function Invoke-Main {
     Assert-Windows
     Ensure-AgentsLayout
+
+    if ($Command -eq 'stop') {
+        return Stop-Agent
+    }
 
     return Start-Agent `
         -LaunchMode $Command `
