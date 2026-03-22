@@ -2343,7 +2343,7 @@ mod tests {
         select_popular_hashes_for_seeding, significant_keyword_words, synthetic_file_hash,
         synthetic_popular_hashes,
     };
-    use crate::{config::SnoopQueueConfig, snoop_queue::SnoopQueue};
+    use crate::{config::SnoopQueueConfig, paths::unique_test_dir, snoop_queue::SnoopQueue};
     use axum::{
         Json, Router,
         extract::{Path as AxumPath, State},
@@ -2717,10 +2717,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_runs_runtime_without_coordinator() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-offline-start-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-offline-start");
         let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
         let agent = OverlordAgentEmule::new(config).await.unwrap();
 
@@ -2740,10 +2737,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_continues_when_initial_coordinator_registration_fails() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-offline-serve-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-offline-serve");
         let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
         let agent = Arc::new(OverlordAgentEmule::new(config).await.unwrap());
         agent.start().await.unwrap();
@@ -2764,10 +2758,7 @@ mod tests {
         let coordinator_addr = probe_listener.local_addr().unwrap();
         drop(probe_listener);
 
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-reconnect-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-reconnect");
         let config = build_test_config(&temp_root, format!("http://{coordinator_addr}"));
         let networking_view = AgentInterfacesView {
             registration: IndexerRegistration {
@@ -2814,10 +2805,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_config_without_endpoint_change_reconciles_in_place() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-config-update-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-config-update");
         let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
         let agent = OverlordAgentEmule::new(config).await.unwrap();
         agent.start().await.unwrap();
@@ -2844,10 +2832,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_config_with_control_endpoint_change_requests_restart() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-control-endpoint-update-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-control-endpoint-update");
         let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
         let agent = OverlordAgentEmule::new(config).await.unwrap();
         agent.start().await.unwrap();
@@ -2872,10 +2857,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_config_with_p2p_endpoint_change_reconciles_in_place() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-p2p-endpoint-update-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-p2p-endpoint-update");
         let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
         let agent = OverlordAgentEmule::new(config).await.unwrap();
         agent.start().await.unwrap();
@@ -2901,10 +2883,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_succeeds_when_shutdown_flush_cannot_reach_coordinator() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-shutdown-flush-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-shutdown-flush");
         let config = build_test_config(&temp_root, "http://127.0.0.1:9".to_string());
         let agent = OverlordAgentEmule::new(config).await.unwrap();
 

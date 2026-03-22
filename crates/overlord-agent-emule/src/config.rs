@@ -407,6 +407,7 @@ mod tests {
         P2pConfig, PERSISTED_NETWORKING_STATE_FILE, normalize_control_config, normalize_log_config,
         normalize_nat_config, normalize_p2p_config,
     };
+    use crate::paths::unique_test_dir;
     use overlord_agent_nat::{
         AgentControlConfig, AgentEd2kConfig, AgentKadConfig, AgentNatConfig, AgentNatP2pConfig,
         AgentNetworkingConfig, AgentP2pConfig, UPNP_MINIUPNPC_BACKEND, UPNP_RUPNP_BACKEND,
@@ -489,10 +490,7 @@ mod tests {
 
     #[test]
     fn load_prefers_explicit_toml_networking_over_persisted_snapshot() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-config-test");
         let state_dir = temp_root.join("state");
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(
@@ -592,10 +590,7 @@ renew_margin_secs = 300
 
     #[test]
     fn load_uses_persisted_networking_for_absent_sections() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-config-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-config-test");
         let state_dir = temp_root.join("state");
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(

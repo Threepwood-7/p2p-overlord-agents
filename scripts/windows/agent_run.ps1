@@ -25,10 +25,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:AgentProcessName = 'overlord-agent-emule'
+$script:WorkspaceProjectDir = if ([string]::IsNullOrWhiteSpace($env:OVERLORD_PROJECT_DIR)) {
+    [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+}
+else {
+    [System.IO.Path]::GetFullPath($env:OVERLORD_PROJECT_DIR)
+}
+$script:AgentsDir = [System.IO.Path]::GetFullPath((Join-Path $script:WorkspaceProjectDir 'overlord-agents'))
 $script:Paths = @{
-    AgentsDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-    CargoToml = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\Cargo.toml'))
-    AgentExe  = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\target\debug\overlord-agent-emule.exe'))
+    AgentsDir = $script:AgentsDir
+    CargoToml = Join-Path $script:AgentsDir 'Cargo.toml'
+    AgentExe  = Join-Path $script:AgentsDir 'target\debug\overlord-agent-emule.exe'
 }
 
 function Write-Log {

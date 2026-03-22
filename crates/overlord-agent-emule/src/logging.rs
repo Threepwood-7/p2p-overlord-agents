@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File},
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use anyhow::{Context, Result};
@@ -14,6 +14,7 @@ use tracing_appender::{
 use tracing_subscriber::EnvFilter;
 
 use crate::config::{EmuleAgentConfig, LogRotation};
+use crate::paths::workspace_log_dir;
 
 const LOG_FILE_PREFIX: &str = "overlord-agent-emule.log";
 
@@ -105,7 +106,7 @@ fn resolve_log_settings(config: &EmuleAgentConfig) -> ResolvedLogSettings {
         .dir
         .as_deref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(&config.agent.state_dir).join("logs"));
+        .unwrap_or_else(workspace_log_dir);
     ResolvedLogSettings {
         dir,
         rotation: config.log.rotation,
@@ -239,38 +240,35 @@ mod tests {
         resolve_log_settings,
     };
     use crate::config::{EmuleAgentConfig, LogRotation};
+    use crate::paths::{unique_test_dir, workspace_log_dir};
     use std::{fs, io::Write};
 
     #[test]
-    fn resolve_log_settings_defaults_to_state_dir_logs() {
-        let mut config = EmuleAgentConfig::default();
-        config.agent.state_dir = "c:\\tmp\\p2p-overlord\\logging-defaults".to_string();
+    fn resolve_log_settings_defaults_to_workspace_log_dir() {
+        let config = EmuleAgentConfig::default();
 
         let settings = resolve_log_settings(&config);
 
-        assert_eq!(
-            settings.dir.display().to_string(),
-            "c:\\tmp\\p2p-overlord\\logging-defaults\\logs"
-        );
+        assert_eq!(settings.dir, workspace_log_dir());
     }
 
     #[test]
     fn current_log_path_uses_stable_head_filename() {
         let mut config = EmuleAgentConfig::default();
-        config.log.dir = Some("c:\\tmp\\p2p-overlord\\logging-daily".to_string());
+        config.log.dir = Some("c:\\tmp\\logs\\logging-daily".to_string());
         config.log.rotation = LogRotation::Daily;
         let settings = resolve_log_settings(&config);
 
         assert_eq!(
             current_log_path(&settings).display().to_string(),
-            "c:\\tmp\\p2p-overlord\\logging-daily\\overlord-agent-emule.log"
+            "c:\\tmp\\logs\\logging-daily\\overlord-agent-emule.log"
         );
     }
 
     #[test]
     fn current_rotated_log_path_matches_daily_rotation_pattern() {
         let mut config = EmuleAgentConfig::default();
-        config.log.dir = Some("c:\\tmp\\p2p-overlord\\logging-daily".to_string());
+        config.log.dir = Some("c:\\tmp\\logs\\logging-daily".to_string());
         config.log.rotation = LogRotation::Daily;
         let settings = resolve_log_settings(&config);
         let now = chrono::DateTime::parse_from_rfc3339("2026-03-21T12:34:56Z")
@@ -281,16 +279,13 @@ mod tests {
 
         assert_eq!(
             path.display().to_string(),
-            "c:\\tmp\\p2p-overlord\\logging-daily\\overlord-agent-emule.log.2026-03-21"
+            "c:\\tmp\\logs\\logging-daily\\overlord-agent-emule.log.2026-03-21"
         );
     }
 
     #[test]
     fn build_file_writer_creates_head_and_rotated_logs_on_write() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "overlord-agent-emule-log-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_root = unique_test_dir("overlord-agent-emule-log-test");
         let mut config = EmuleAgentConfig::default();
         config.log.dir = Some(temp_root.display().to_string());
         config.log.rotation = LogRotation::Daily;
