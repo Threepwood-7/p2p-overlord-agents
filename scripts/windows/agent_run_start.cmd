@@ -2,4 +2,4 @@
 
 CD /D %~dp0
 
-NODE.EXE agent_run.mjs start %*
+"%ProgramFiles%\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -File agent_run.ps1 start %*
