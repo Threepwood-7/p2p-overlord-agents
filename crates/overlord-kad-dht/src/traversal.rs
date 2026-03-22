@@ -152,6 +152,7 @@ pub async fn run_traversal(
         for idx in pending_closest {
             candidates[idx].state = CandidateState::Inflight;
             let contact = candidates[idx].contact.clone();
+            register_traversal_identity(rpc, &contact);
             let rpc = rpc.clone();
             let query_timeout = query_timeout.min(remaining);
 
@@ -358,6 +359,7 @@ async fn run_search_phase(
     let queried_addrs: HashSet<SocketAddr> = send_to.iter().map(|contact| contact.addr).collect();
 
     for contact in send_to {
+        register_traversal_identity(rpc, contact);
         let packet = match kind {
             TraversalKind::Keyword { ref request } => KadPacket::SearchKeyReq(request.clone()),
             TraversalKind::Source { size } => KadPacket::SearchSourceReq(SearchSourceReq {
@@ -443,6 +445,16 @@ async fn run_search_phase(
     );
 
     search_entries
+}
+
+/// Register traversal contact identity with the RPC layer before sending.
+///
+/// Traversal frequently queries freshly discovered contacts before they are persisted in the
+/// routing table, so the traversal itself must seed the RPC obfuscation cache with their Kad IDs.
+fn register_traversal_identity(rpc: &RpcManager, contact: &TraversalContact) {
+    if contact.id != NodeId::ZERO {
+        rpc.register_peer_identity(contact.addr, contact.id);
+    }
 }
 
 fn select_phase2_contacts(
@@ -531,6 +543,7 @@ mod tests {
     use super::*;
     use overlord_kad_net::MockTransport;
     use overlord_kad_net::{ObfuscationLayer, RpcConfig};
+    use overlord_kad_proto::constants::OP_KADEMLIAHEADER;
     use overlord_kad_proto::{Ed2kHash, packet::SearchRes};
     use overlord_kad_proto::{KadPacket, NodeId};
     use std::sync::Arc;
@@ -858,5 +871,59 @@ mod tests {
             panic!("expected SearchKeyReq");
         };
         assert_eq!(request, restrictive_request);
+    }
+
+    #[tokio::test]
+    async fn test_run_traversal_obfuscates_phase1_queries_for_fresh_contacts() {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:0".parse().unwrap()));
+        let injector = transport.injector();
+        let rpc = RpcManager::new(
+            Arc::clone(&transport),
+            ObfuscationLayer::new(NodeId::from_bytes([0x10; 16]), 0x1122_3344, true),
+            RpcConfig::default(),
+        );
+        let _handle = rpc.start();
+
+        let target = NodeId::from_bytes([0x44; 16]);
+        let contact = TraversalContact {
+            id: NodeId::from_bytes([0x12; 16]),
+            addr: "127.0.0.1:4672".parse().unwrap(),
+            version: 9,
+        };
+        let reply_addr = contact.addr;
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let packet = KadPacket::Res(overlord_kad_proto::packet::Res {
+                target,
+                contacts: Vec::new(),
+            });
+            injector.send((packet.encode().unwrap(), reply_addr)).await.unwrap();
+        });
+
+        let result = run_traversal(
+            &rpc,
+            vec![contact.clone()],
+            TraversalConfig {
+                target,
+                search_kind: TraversalKind::FindNode,
+                timeout: Duration::from_secs(1),
+                query_timeout: Duration::from_millis(200),
+                phase2_fanout: 1,
+                cancel: CancellationToken::new(),
+                result_tx: None,
+            },
+        )
+        .await;
+
+        let outgoing = transport.drain_outgoing();
+        assert!(!outgoing.is_empty(), "expected traversal to send a query");
+        assert_eq!(outgoing[0].0, contact.addr);
+        assert_ne!(
+            outgoing[0].1[0], OP_KADEMLIAHEADER,
+            "phase1 query should already be obfuscated for a known Kad ID"
+        );
+        assert_eq!(result.closest.len(), 1);
+        assert_eq!(result.closest[0].id, contact.id);
     }
 }

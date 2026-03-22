@@ -78,6 +78,7 @@ pub async fn publish_keyword(
         ..PublishAttemptStats::default()
     };
     for contact in traversal.closest.iter().take(K) {
+        register_publish_contact(rpc, contact);
         match rpc
             .request(
                 contact.addr,
@@ -142,6 +143,7 @@ pub async fn publish_source(
         ..PublishAttemptStats::default()
     };
     for contact in traversal.closest.iter().take(K) {
+        register_publish_contact(rpc, contact);
         match rpc
             .request(
                 contact.addr,
@@ -202,6 +204,7 @@ pub async fn publish_notes(
 
     let mut acks = 0usize;
     for contact in traversal.closest.iter().take(K) {
+        register_publish_contact(rpc, contact);
         match rpc
             .request(
                 contact.addr,
@@ -232,4 +235,14 @@ async fn get_initial(
             version: c.kad_version,
         })
         .collect()
+}
+
+/// Register publish-target contact identity before sending the publish request.
+///
+/// Publish fanout works on traversal results directly, so these contacts may not have reached the
+/// routing table yet even though their Kad IDs are already known.
+fn register_publish_contact(rpc: &RpcManager, contact: &TraversalContact) {
+    if contact.id != NodeId::ZERO {
+        rpc.register_peer_identity(contact.addr, contact.id);
+    }
 }
