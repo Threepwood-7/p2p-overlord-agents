@@ -5,7 +5,8 @@ Builds and launches the Windows agent from a PowerShell entry point.
 .DESCRIPTION
 This helper validates the Rust workspace layout, optionally clears any dangling
 agent instance, rebuilds `overlord-agent-emule`, and then launches the agent in
-either standard or attach-friendly debug mode.
+either standard or attach-friendly debug mode. Pass `-RunDetached` to relaunch
+this helper in a minimized background PowerShell 7 window and return immediately.
 #>
 
 [CmdletBinding()]
@@ -18,11 +19,17 @@ param(
 
     [switch]$DontKill,
 
-    [string[]]$AgentArgs = @()
+    [string[]]$AgentArgs = @(),
+
+    [switch]$RunDetached
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:InvocationBoundParameters = @{}
+foreach ($entry in $PSBoundParameters.GetEnumerator()) {
+    $script:InvocationBoundParameters[$entry.Key] = $entry.Value
+}
 
 $script:AgentProcessName = 'overlord-agent-emule'
 $script:WorkspaceProjectDir = if ([string]::IsNullOrWhiteSpace($env:OVERLORD_PROJECT_DIR)) {
@@ -66,6 +73,78 @@ function Ensure-AgentsLayout {
     if (-not (Test-Path -LiteralPath $script:Paths.CargoToml -PathType Leaf)) {
         Fail "Agent workspace Cargo.toml is missing at $($script:Paths.CargoToml)"
     }
+}
+
+function Resolve-Pwsh7Path {
+    $programFiles = if ([string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+        'C:\Program Files'
+    }
+    else {
+        $env:ProgramFiles
+    }
+
+    $preferredPath = Join-Path $programFiles 'PowerShell\7\pwsh.exe'
+    if (Test-Path -LiteralPath $preferredPath -PathType Leaf) {
+        return $preferredPath
+    }
+
+    $pwshCommand = Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $pwshCommand -and -not [string]::IsNullOrWhiteSpace($pwshCommand.Source)) {
+        return $pwshCommand.Source
+    }
+
+    Fail 'PowerShell 7 `pwsh.exe` was not found. Install PowerShell 7 and retry.'
+}
+
+function Get-DetachedInvocationArguments {
+    # Build a deterministic argument list and intentionally omit -RunDetached to
+    # avoid recursive relaunch loops.
+    $forwardedArgs = @($Command)
+
+    if ($script:InvocationBoundParameters.ContainsKey('ConfigPath')) {
+        $forwardedArgs += '-ConfigPath'
+        $forwardedArgs += $ConfigPath
+    }
+
+    if ($script:InvocationBoundParameters.ContainsKey('DontKill')) {
+        if ($DontKill.IsPresent) {
+            $forwardedArgs += '-DontKill'
+        }
+        else {
+            $forwardedArgs += '-DontKill:$false'
+        }
+    }
+
+    if ($script:InvocationBoundParameters.ContainsKey('AgentArgs') -and $AgentArgs.Count -gt 0) {
+        $forwardedArgs += '-AgentArgs'
+        $forwardedArgs += $AgentArgs
+    }
+
+    return $forwardedArgs
+}
+
+function Start-DetachedSelf {
+    $pwshPath = Resolve-Pwsh7Path
+    $scriptPath = [System.IO.Path]::GetFullPath($PSCommandPath)
+    $argumentList = @('-NoLogo', '-NoProfile', '-File', $scriptPath)
+    $argumentList += @(Get-DetachedInvocationArguments)
+
+    $detachedProcess = Start-Process `
+        -FilePath $pwshPath `
+        -ArgumentList $argumentList `
+        -WorkingDirectory (Get-Location).Path `
+        -WindowStyle Minimized `
+        -PassThru
+
+    try {
+        Write-Log "Detached agent helper started as PID $($detachedProcess.Id)."
+    }
+    finally {
+        $detachedProcess.Dispose()
+    }
+
+    return 0
 }
 
 function Get-AgentRuntimeArguments {
@@ -233,6 +312,10 @@ function Start-Agent {
 function Invoke-Main {
     Assert-Windows
     Ensure-AgentsLayout
+
+    if ($RunDetached.IsPresent) {
+        return Start-DetachedSelf
+    }
 
     if ($Command -eq 'stop') {
         return Stop-Agent
