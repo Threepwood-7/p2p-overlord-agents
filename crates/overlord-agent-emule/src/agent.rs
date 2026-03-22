@@ -44,8 +44,8 @@ use overlord_kad_dht::{
     bootstrap::{BootstrapContact, encode_nodes_dat},
 };
 use overlord_kad_proto::{
-    Ed2kHash, KadPacket, NodeId, SearchKeyReq, SearchNotesReq, SearchSourceReq, Tag, TagName,
-    TagValue, constants::K, packet::ContactEntry, tag_name,
+    Ed2kHash, KadPacket, KadUdpKey, NodeId, SearchKeyReq, SearchNotesReq, SearchSourceReq, Tag,
+    TagName, TagValue, constants::K, packet::ContactEntry, tag_name,
 };
 use overlord_kad_routing::Contact;
 
@@ -1597,6 +1597,7 @@ async fn persist_nodes_dat_for(dht: &DhtNode, state_paths: &AgentStatePaths) -> 
             udp_port: contact.udp_port,
             tcp_port: contact.tcp_port,
             version: contact.kad_version,
+            udp_key: contact.udp_key,
         })
         .collect::<Vec<_>>();
     let bytes = encode_nodes_dat(&contacts)?;
@@ -1618,14 +1619,13 @@ async fn handle_unsolicited_packet(
                 dht.register_peer_key(from, udp_key);
             }
             if let std::net::IpAddr::V4(ip) = from.ip() {
+                let mut contact =
+                    Contact::new(req.node_id, ip, from.port(), req.tcp_port, req.version);
+                if let Some(udp_key) = req.udp_key {
+                    contact.udp_key = KadUdpKey::new(udp_key);
+                }
                 let _ = dht
-                    .add_contact(Contact::new(
-                        req.node_id,
-                        ip,
-                        from.port(),
-                        req.tcp_port,
-                        req.version,
-                    ))
+                    .add_contact(contact)
                     .await;
             }
             let bind_addr = dht.bind_addr()?;
@@ -1652,14 +1652,13 @@ async fn handle_unsolicited_packet(
                 dht.register_peer_key(from, udp_key);
             }
             if let std::net::IpAddr::V4(ip) = from.ip() {
+                let mut contact =
+                    Contact::new(res.node_id, ip, from.port(), res.tcp_port, res.version);
+                if let Some(udp_key) = res.udp_key {
+                    contact.udp_key = KadUdpKey::new(udp_key);
+                }
                 let _ = dht
-                    .add_contact(Contact::new(
-                        res.node_id,
-                        ip,
-                        from.port(),
-                        res.tcp_port,
-                        res.version,
-                    ))
+                    .add_contact(contact)
                     .await;
             }
             let _ = dht.send_packet(from, &KadPacket::HelloResAck).await;

@@ -1,5 +1,6 @@
 use crate::error::DhtError;
 use binrw::{BinRead, BinWrite};
+use overlord_kad_proto::{KadUdpKey, NodeId};
 
 /// Basic 25-byte entry: node_id + ip + udp_port + tcp_port + version.
 #[derive(BinRead, BinWrite, Debug, Clone)]
@@ -17,23 +18,25 @@ struct NodesDatEntry {
 #[derive(BinRead, BinWrite, Debug, Clone)]
 #[brw(little)]
 struct NodesDatEntryExt {
-    node_id: overlord_kad_proto::NodeId,
+    node_id: NodeId,
     ip: u32,
     udp_port: u16,
     tcp_port: u16,
     version: u8,
     _contact_type: u8,
     _last_seen: u32,
-    _udp_key: u32,
+    udp_key: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct BootstrapContact {
-    pub node_id: overlord_kad_proto::NodeId,
+    pub node_id: NodeId,
     pub ip: std::net::Ipv4Addr,
     pub udp_port: u16,
     pub tcp_port: u16,
     pub version: u8,
+    /// Peer UDP anti-spoofing key persisted from `nodes.dat` or learned at runtime.
+    pub udp_key: KadUdpKey,
 }
 
 /// Parse a nodes.dat file in any of the known eMule/aMule formats:
@@ -91,12 +94,26 @@ pub fn parse_nodes_dat(data: &[u8]) -> Result<Vec<BootstrapContact>, DhtError> {
 
     let mut contacts = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let (node_id, ip, udp_port, tcp_port, version) = if extended {
+        let (node_id, ip, udp_port, tcp_port, version, udp_key) = if extended {
             let e: NodesDatEntryExt = cursor.read_le().map_err(|_| DhtError::NodesDatParse)?;
-            (e.node_id, e.ip, e.udp_port, e.tcp_port, e.version)
+            (
+                e.node_id,
+                e.ip,
+                e.udp_port,
+                e.tcp_port,
+                e.version,
+                KadUdpKey::new(e.udp_key),
+            )
         } else {
             let e: NodesDatEntry = cursor.read_le().map_err(|_| DhtError::NodesDatParse)?;
-            (e.node_id, e.ip, e.udp_port, e.tcp_port, e.version)
+            (
+                e.node_id,
+                e.ip,
+                e.udp_port,
+                e.tcp_port,
+                e.version,
+                KadUdpKey::ZERO,
+            )
         };
 
         if ip == 0 || udp_port == 0 {
@@ -111,6 +128,7 @@ pub fn parse_nodes_dat(data: &[u8]) -> Result<Vec<BootstrapContact>, DhtError> {
             udp_port,
             tcp_port,
             version,
+            udp_key,
         });
     }
     Ok(contacts)
@@ -131,11 +149,12 @@ pub fn parse_nodes_text(text: &str) -> Vec<BootstrapContact> {
                 _ => continue,
             };
             contacts.push(BootstrapContact {
-                node_id: overlord_kad_proto::NodeId::ZERO,
+                node_id: NodeId::ZERO,
                 ip,
                 udp_port: addr.port(),
                 tcp_port: addr.port(),
                 version: 9,
+                udp_key: KadUdpKey::ZERO,
             });
         }
     }
@@ -148,11 +167,12 @@ pub fn hardcoded_bootstrap() -> Vec<BootstrapContact> {
     macro_rules! bc {
         ($ip:expr, $udp:expr, $tcp:expr, $ver:expr) => {
             BootstrapContact {
-                node_id: overlord_kad_proto::NodeId::ZERO,
+                node_id: NodeId::ZERO,
                 ip: $ip.parse().unwrap(),
                 udp_port: $udp,
                 tcp_port: $tcp,
                 version: $ver,
+                udp_key: KadUdpKey::ZERO,
             }
         };
     }
@@ -236,7 +256,7 @@ pub fn encode_nodes_dat(contacts: &[BootstrapContact]) -> Result<Vec<u8>, DhtErr
             version: contact.version,
             _contact_type: 2,
             _last_seen: 0,
-            _udp_key: 0,
+            udp_key: contact.udp_key.value(),
         };
         cursor
             .write_le(&entry)
@@ -261,11 +281,11 @@ mod tests {
         e // 25 bytes
     }
 
-    fn make_ext_entry(ip: [u8; 4], udp: u16, tcp: u16, ver: u8) -> Vec<u8> {
+    fn make_ext_entry(ip: [u8; 4], udp: u16, tcp: u16, ver: u8, udp_key: u32) -> Vec<u8> {
         let mut e = make_basic_entry(ip, udp, tcp, ver);
         e.push(2u8); // contact_type
         e.extend_from_slice(&0u32.to_le_bytes()); // last_seen
-        e.extend_from_slice(&0u32.to_le_bytes()); // udp_key
+        e.extend_from_slice(&udp_key.to_le_bytes());
         e // 34 bytes
     }
 
@@ -276,8 +296,8 @@ mod tests {
         data.extend_from_slice(&0u32.to_le_bytes()); // magic
         data.extend_from_slice(&2u32.to_le_bytes()); // version
         data.extend_from_slice(&2u32.to_le_bytes()); // count
-        data.extend(make_ext_entry([1, 2, 3, 4], 4672, 4662, 9));
-        data.extend(make_ext_entry([10, 0, 0, 1], 4673, 4663, 8));
+        data.extend(make_ext_entry([1, 2, 3, 4], 4672, 4662, 9, 0x1122_3344));
+        data.extend(make_ext_entry([10, 0, 0, 1], 4673, 4663, 8, 0x5566_7788));
 
         let contacts = parse_nodes_dat(&data).unwrap();
         assert_eq!(contacts.len(), 2);
@@ -287,11 +307,13 @@ mod tests {
         );
         assert_eq!(contacts[0].udp_port, 4672);
         assert_eq!(contacts[0].version, 9);
+        assert_eq!(contacts[0].udp_key, KadUdpKey::new(0x1122_3344));
         assert_eq!(
             contacts[1].ip,
             "10.0.0.1".parse::<std::net::Ipv4Addr>().unwrap()
         );
         assert_eq!(contacts[1].udp_port, 4673);
+        assert_eq!(contacts[1].udp_key, KadUdpKey::new(0x5566_7788));
     }
 
     #[test]
@@ -311,7 +333,9 @@ mod tests {
         );
         assert_eq!(contacts[0].udp_port, 4672);
         assert_eq!(contacts[0].version, 9);
+        assert_eq!(contacts[0].udp_key, KadUdpKey::ZERO);
         assert_eq!(contacts[1].udp_port, 4673);
+        assert_eq!(contacts[1].udp_key, KadUdpKey::ZERO);
     }
 
     #[test]
@@ -325,6 +349,7 @@ mod tests {
         let contacts = parse_nodes_dat(&data).unwrap();
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].version, 9);
+        assert_eq!(contacts[0].udp_key, KadUdpKey::ZERO);
     }
 
     #[test]
@@ -344,6 +369,7 @@ mod tests {
         assert_eq!(contacts.len(), 2);
         assert_eq!(contacts[0].udp_port, 4672);
         assert_eq!(contacts[1].udp_port, 4673);
+        assert_eq!(contacts[0].udp_key, KadUdpKey::ZERO);
     }
 
     #[test]
@@ -351,5 +377,29 @@ mod tests {
         let text = "not_an_ip:port\n127.0.0.1:4672\n";
         let contacts = parse_nodes_text(text);
         assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].udp_key, KadUdpKey::ZERO);
+    }
+
+    #[test]
+    fn test_encode_nodes_dat_roundtrips_udp_key() {
+        let contact = BootstrapContact {
+            node_id: NodeId::from_bytes([0x11; 16]),
+            ip: "1.2.3.4".parse().unwrap(),
+            udp_port: 4665,
+            tcp_port: 4662,
+            version: 9,
+            udp_key: KadUdpKey::new(0xA1B2_C3D4),
+        };
+
+        let data = encode_nodes_dat(&[contact.clone()]).unwrap();
+        let parsed = parse_nodes_dat(&data).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].node_id, contact.node_id);
+        assert_eq!(parsed[0].ip, contact.ip);
+        assert_eq!(parsed[0].udp_port, contact.udp_port);
+        assert_eq!(parsed[0].tcp_port, contact.tcp_port);
+        assert_eq!(parsed[0].version, contact.version);
+        assert_eq!(parsed[0].udp_key, contact.udp_key);
     }
 }

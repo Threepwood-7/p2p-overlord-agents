@@ -1,5 +1,5 @@
 use md5::compute as md5_compute;
-use overlord_kad_proto::constants::{OP_KADEMLIAHEADER, OP_KADEMLIAPACKEDPROT, opcode};
+use overlord_kad_proto::constants::{OP_KADEMLIAHEADER, OP_KADEMLIAPACKEDPROT};
 use overlord_kad_proto::NodeId;
 use rand::Rng;
 use std::collections::HashMap;
@@ -103,22 +103,6 @@ fn marker_try_order(marker: u8) -> [KadKeyMode; 2] {
     }
 }
 
-fn response_like_opcode(opcode: u8) -> bool {
-    matches!(
-        opcode,
-        opcode::BOOTSTRAP_RES
-            | opcode::HELLO_RES
-            | opcode::HELLO_RES_ACK
-            | opcode::RES
-            | opcode::SEARCH_RES
-            | opcode::PUBLISH_RES
-            | opcode::PUBLISH_RES_ACK
-            | opcode::FIREWALLED_RES
-            | opcode::FIREWALLED_ACK_RES
-            | opcode::PONG
-    )
-}
-
 fn is_plain_protocol_marker(byte: u8) -> bool {
     matches!(byte, 0xE3 | 0xE4 | 0xE5 | 0xA3 | 0xC5 | 0xD4)
 }
@@ -140,8 +124,9 @@ fn select_marker(mode: KadKeyMode) -> u8 {
 /// Oracle-shaped Kad UDP obfuscation layer.
 ///
 /// This mirrors the Kad branch of eMule/aMule `EncryptedDatagramSocket`:
-/// request packets prefer NodeID-based obfuscation, while response packets use
-/// the sender verify key recovered from prior obfuscated traffic.
+/// whenever we know the peer Kad ID we keep preferring NodeID-based
+/// obfuscation, and only fall back to the receiver verify key when the Kad ID
+/// is unavailable.
 pub struct ObfuscationLayer {
     our_node_id: NodeId,
     our_udp_key: u32,
@@ -190,24 +175,17 @@ impl ObfuscationLayer {
 
     /// Encrypt a Kad packet for sending to `addr`.
     ///
-    /// The caller supplies the opcode so we can mirror the oracle preference:
-    /// request packets use NodeID obfuscation when possible, while replies
-    /// prefer the receiver verify key learned from prior traffic.
-    pub fn encrypt(&self, addr: SocketAddr, opcode: u8, plaintext: &[u8]) -> Vec<u8> {
+    /// The caller still passes the opcode for tracing/call-site symmetry, but
+    /// the oracle selection rule is identity-driven rather than opcode-driven:
+    /// use the peer Kad ID when we know it, otherwise fall back to the receiver
+    /// verify key.
+    pub fn encrypt(&self, addr: SocketAddr, _opcode: u8, plaintext: &[u8]) -> Vec<u8> {
         if !self.enabled {
             return plaintext.to_vec();
         }
 
         let peer = self.peers.lock().unwrap().get(&addr).cloned().unwrap_or_default();
-        let preferred_mode = if response_like_opcode(opcode) {
-            if peer.receiver_verify_key.is_some() {
-                Some(KadKeyMode::ReceiverVerifyKey)
-            } else if peer.node_id.is_some() {
-                Some(KadKeyMode::NodeId)
-            } else {
-                None
-            }
-        } else if peer.node_id.is_some() {
+        let preferred_mode = if peer.node_id.is_some() {
             Some(KadKeyMode::NodeId)
         } else if peer.receiver_verify_key.is_some() {
             Some(KadKeyMode::ReceiverVerifyKey)
@@ -334,6 +312,7 @@ impl ObfuscationLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use overlord_kad_proto::opcode;
 
     fn sender_addr() -> SocketAddr {
         "1.2.3.4:4672".parse().unwrap()
@@ -388,6 +367,29 @@ mod tests {
         let encrypted = sender.encrypt(receiver_addr(), opcode::PONG, &plaintext);
         assert_ne!(encrypted, plaintext);
         assert_eq!(encrypted[0] & 0x03, KAD_MARKER_RECEIVER_KEY);
+
+        let decrypted = receiver.decrypt(sender_addr(), &encrypted);
+        assert!(decrypted.was_obfuscated);
+        assert_eq!(decrypted.data, plaintext);
+    }
+
+    #[test]
+    fn test_node_id_mode_is_preferred_over_receiver_key_even_for_response_opcodes() {
+        let sender = ObfuscationLayer::new(NodeId::from_bytes([0x55; 16]), 0xAABB_CCDD, true);
+        let receiver = ObfuscationLayer::new(NodeId::from_bytes([0x66; 16]), 0x1122_3344, true);
+        let sender_ip = match sender_addr().ip() {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => unreachable!(),
+        };
+
+        sender.register_peer_identity(receiver_addr(), receiver.our_node_id);
+        sender.register_peer_key(receiver_addr(), receiver.verify_key_for_ip(sender_ip));
+
+        let plaintext = vec![OP_KADEMLIAHEADER, opcode::PUBLISH_RES, 0xAA, 0x55];
+        let encrypted = sender.encrypt(receiver_addr(), opcode::PUBLISH_RES, &plaintext);
+
+        // eMule keeps preferring the Kad ID path when it knows both values.
+        assert_eq!(encrypted[0] & 0x03, 0);
 
         let decrypted = receiver.decrypt(sender_addr(), &encrypted);
         assert!(decrypted.was_obfuscated);

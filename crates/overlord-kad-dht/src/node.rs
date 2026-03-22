@@ -3,7 +3,9 @@ use crate::error::DhtError;
 use crate::traversal::{TraversalConfig, TraversalContact, TraversalKind, run_traversal};
 use crate::types::{NoteResult, SearchResult, SourceResult};
 use overlord_kad_net::{ObfuscationLayer, RpcConfig, RpcManager, UdpTransport};
-use overlord_kad_proto::{Ed2kHash, KadPacket, NodeId, SearchKeyReq, Tag, constants::K, opcode};
+use overlord_kad_proto::{
+    Ed2kHash, KadPacket, KadUdpKey, NodeId, SearchKeyReq, Tag, constants::K, opcode,
+};
 use overlord_kad_routing::{Contact, RoutingTable};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -193,9 +195,11 @@ impl DhtNode {
 
     /// Upsert a single contact into the routing table.
     pub async fn add_contact(&self, contact: Contact) -> Result<(), DhtError> {
-        self.inner
-            .rpc
-            .register_peer_identity(addr_from_contact(&contact), contact.id);
+        let addr = addr_from_contact(&contact);
+        self.inner.rpc.register_peer_identity(addr, contact.id);
+        if contact.udp_key != KadUdpKey::ZERO {
+            self.inner.rpc.register_peer_key(addr, contact.udp_key.value());
+        }
         self.inner.routing_table.lock().await.add_contact(contact)?;
         Ok(())
     }
@@ -235,6 +239,12 @@ impl DhtNode {
         // Send BOOTSTRAP_REQ to up to 10 contacts
         for bc in contacts.iter().take(10) {
             let addr = SocketAddr::new(IpAddr::V4(bc.ip), bc.udp_port);
+            if bc.node_id != NodeId::ZERO {
+                self.inner.rpc.register_peer_identity(addr, bc.node_id);
+            }
+            if bc.udp_key != KadUdpKey::ZERO {
+                self.inner.rpc.register_peer_key(addr, bc.udp_key.value());
+            }
             debug!("bootstrap attempt to {}", addr);
 
             match self
