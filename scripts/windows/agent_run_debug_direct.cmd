@@ -16,6 +16,6 @@ CD /D %OVERLORD_PROJECT_DIR%\overlord-agents
 cargo build -p overlord-agent-emule --bin overlord-agent-emule
 IF ERRORLEVEL 1 EXIT /B %ERRORLEVEL%
 
-
+SET RUST_BACKTRACE=1
 
 START "" target\debug\overlord-agent-emule.exe --config %OVERLORD_TMP_DIR%\agent-real-miniupnpc.toml
